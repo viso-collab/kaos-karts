@@ -83,6 +83,10 @@ html,body{height:100%;margin:0;background:var(--ink);color:var(--text);font-fami
 #hit::after{top:12px;left:0;height:3px;width:26px}
 #hit.on{animation:hm .25s ease-out}
 @keyframes hm{0%{opacity:1;transform:translate(-50%,-50%) rotate(45deg) scale(1.4)}100%{opacity:0;transform:translate(-50%,-50%) rotate(45deg) scale(1)}}
+#lock{position:absolute;top:calc(70px + env(safe-area-inset-top,0px));left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:10px;padding:8px 16px;border-radius:12px;background:rgba(255,61,110,.88);border:2px solid #fff;font:16px var(--display);letter-spacing:.05em;box-shadow:0 0 24px rgba(255,61,110,.8);animation:lockp .5s ease-in-out infinite alternate}
+#lock small{font:500 13px var(--body);letter-spacing:0;opacity:.9}
+#lockArrow{display:inline-block;font-size:20px;line-height:1;transition:transform .08s linear}
+@keyframes lockp{to{background:rgba(160,10,50,.88);box-shadow:0 0 8px rgba(255,61,110,.4)}}
 #vign{position:absolute;inset:0;box-shadow:inset 0 0 160px rgba(255,30,70,.75);opacity:0;transition:opacity .4s}
 #vign.on{opacity:1;transition:none}
 #plus{position:absolute;left:50%;top:42%;transform:translateX(-50%);font:28px var(--display);color:var(--volt);opacity:0;text-shadow:0 3px 0 rgba(0,0,0,.4)}
@@ -225,6 +229,7 @@ tr.me td{background:rgba(255,210,63,.12);font-weight:700}
   <div id="hint">Esc pause · M lyd</div>
   <canvas id="mini" width="320" height="320"></canvas>
   <div id="msg"></div>
+  <div id="lock" hidden><span id="lockArrow">▲</span><span>MÅLSØGER! <small id="lockDist"></small></span></div>
   <div id="plus">+1 KILL</div>
   <div id="hit"></div>
   <div id="vign"></div>
@@ -714,6 +719,7 @@ const sfx = {
   clink: (x, z) => { const v = vol(x, z); tone(1500, 0.1, 'triangle', 0.1 * v, 1100); },
   mine: (x, z) => { const v = vol(x, z); tone(400, 0.08, 'square', 0.06 * v); },
   shock: (x, z) => { const v = vol(x, z); noise(0.5, 0.4 * v, 900); tone(90, 0.5, 'sine', 0.35 * v, 40); },
+  lock: () => { tone(1250, 0.07, 'square', 0.07); },
   beep: (hi) => { tone(hi ? 880 : 440, hi ? 0.4 : 0.15, 'square', 0.09); },
   boost: (x, z) => { const v = vol(x, z); tone(300, 0.35, 'sawtooth', 0.06 * v, 900); },
   superjump: (x, z) => { const v = vol(x, z); tone(180, 0.5, 'square', 0.09 * v, 900); noise(0.4, 0.2 * v, 2000); },
@@ -988,9 +994,16 @@ function useWeapon(k, inp) {
       const others = karts.filter(o => o !== k && o.alive);
       if (others.length) {
         const top = Math.max(...others.map(o => o.kills)), cands = others.filter(o => o.kills === top), t = cands[Math.floor(Math.random() * cands.length)];
-        bolt(t.x, t.z); sfx.thunder(t.x, t.z); pushEv(['fx', 'bolt', r1(t.x), r1(t.z)]);
-        if (t.shieldT <= 0 && t.invulnT <= 0) t.spinT = 0.7;
-        damage(t, 30, k, 'Lyn');
+        if (Math.random() < 0.25) { // 25% chance for at misse: lynet slår ned ved siden af målet
+          const ma = rand(0, TAU), mx = t.x + Math.sin(ma) * 4, mz = t.z + Math.cos(ma) * 4;
+          bolt(mx, mz); sfx.thunder(mx, mz); pushEv(['fx', 'bolt', r1(mx), r1(mz)]);
+          if (k.isPlayer) setMsg('Lynet missede!', `${t.name} slap væk`, 1.2, true);
+          else if (t.isPlayer) setMsg('Heldig!', `Lynet fra ${k.name} missede dig`, 1.2, true);
+        } else {
+          bolt(t.x, t.z); sfx.thunder(t.x, t.z); pushEv(['fx', 'bolt', r1(t.x), r1(t.z)]);
+          if (t.shieldT <= 0 && t.invulnT <= 0) t.spinT = 0.7;
+          damage(t, 30, k, 'Lyn');
+        }
       }
     } else if (w === 'turbo') { k.turboT = 3; k.boostT = 0; sfx.boost(k.x, k.z); }
     else if (w === 'shock') {
@@ -1276,7 +1289,7 @@ function feed(src, t, wname) {
   feedEl.appendChild(el); while (feedEl.children.length > 5) feedEl.firstChild.remove();
   setTimeout(() => el.remove(), 5000);
 }
-let msgTimer = 0;
+let msgTimer = 0, lockBeep = 0;
 function setMsg(big, sub, dur, show) {
   const m = $('msg'); m.innerHTML = '';
   const b = document.createElement('div'); b.className = 'big'; b.textContent = big; m.append(b);
@@ -1314,6 +1327,16 @@ function updateHud(dt) {
       r.querySelector('.nm').textContent = (crown.holder === k ? '♛ ' : '') + k.name; b.appendChild(r);
     }
   }
+  // målsøger-advarsel: nærmeste målsøger der jagter spilleren
+  let lk = null, ld = Infinity;
+  if (player.alive) for (const p of projs) if (p.type === 'homing' && p.target === player && p.owner !== player) { const d = Math.hypot(p.x - player.x, p.z - player.z); if (d < ld) { ld = d; lk = p; } }
+  const lockEl = $('lock'); lockEl.hidden = !lk;
+  if (lk) {
+    const dx = lk.x - player.x, dz = lk.z - player.z, sa = Math.sin(player.a), ca = Math.cos(player.a);
+    $('lockArrow').style.transform = `rotate(${Math.atan2(-dx * ca + dz * sa, dx * sa + dz * ca)}rad)`;
+    $('lockDist').textContent = `${Math.round(ld)} m`;
+    lockBeep -= dt; if (lockBeep <= 0) { sfx.lock(); lockBeep = clamp(ld / 60, 0.08, 0.5); }
+  } else lockBeep = 0;
   if (msgTimer > 0) { msgTimer -= dt; if (!player.alive && state === 'play') { const s = $('msg').querySelector('.sub'); if (s && !s.dataset.base) s.dataset.base = s.textContent; if (s) s.textContent = `${s.dataset.base} · tilbage om ${Math.max(1, Math.ceil(player.respawnT))}`; } if (msgTimer <= 0) $('msg').innerHTML = ''; }
   // minimap
   const S = mini.width, c = S / 2, sc = (S / 2 - 6) / R;
