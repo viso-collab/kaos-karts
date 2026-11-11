@@ -171,6 +171,10 @@ input:focus-visible,button:focus-visible{outline:2px solid var(--volt);outline-o
 .namecard h2{font-size:clamp(26px,5vw,36px)!important}
 .namecard p{margin:0!important}
 .namecard input{margin:0}
+.namecard form{display:grid;gap:10px}
+.namealt{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.linkbtn{background:none;border:0;padding:0;color:var(--ice);font:500 13px var(--body);cursor:pointer;text-decoration:underline;text-underline-offset:2px}
+.acct{font-size:13px;color:var(--muted);margin:-8px 0 14px;display:flex;gap:6px;flex-wrap:wrap}
 .nameerr{color:var(--hot)!important;font-size:13px;min-height:1em}
 .lock{margin:-10px 0 14px;font-size:12px;color:var(--muted)}
 #pname[readonly]{opacity:.85;cursor:default}
@@ -243,6 +247,7 @@ tr.me td{background:rgba(255,210,63,.12);font-weight:700}
       <label for="pname">Navn</label>
       <input id="pname" maxlength="14" value="" autocomplete="off" readonly>
       <p class="lock" id="nameLock" hidden>Dit navn er låst, så det passer med leaderboardet.</p>
+      <p class="acct" id="acct" hidden><button class="linkbtn" id="setPwBtn" type="button">Sæt adgangskode</button><span>·</span><button class="linkbtn" id="switchBtn" type="button">Log ind som en anden</button></p>
       <div class="lbl" id="swlbl">Farve</div>
       <div id="swatches" role="group" aria-labelledby="swlbl"></div>
       <div class="lbl" id="modelbl">Spiltilstand</div>
@@ -300,11 +305,15 @@ tr.me td{background:rgba(255,210,63,.12);font-weight:700}
 
 <div class="overlay" id="namePop" hidden>
   <div class="endcard namecard">
-    <h2>Hvad skal du hedde?</h2>
-    <p>Dit navn vises på leaderboards og i online-kampe. Det kan ikke ændres bagefter.</p>
-    <input id="nameIn" maxlength="14" autocomplete="off" placeholder="Dit navn" aria-label="Dit navn">
-    <p id="nameErr" class="nameerr" role="alert"></p>
-    <button class="btn" id="nameSave">Gem navn</button>
+    <h2 id="nameTitle">Hvad skal du hedde?</h2>
+    <p id="nameIntro">Dit navn vises på leaderboards og i online-kampe. Det kan ikke ændres bagefter.</p>
+    <form id="nameForm" novalidate>
+      <input id="nameIn" name="username" maxlength="14" autocomplete="username" placeholder="Dit navn" aria-label="Dit navn">
+      <input id="pwIn" name="password" type="password" maxlength="72" autocomplete="new-password" placeholder="Adgangskode (mindst 6 tegn)" aria-label="Adgangskode">
+      <p id="nameErr" class="nameerr" role="alert"></p>
+      <button class="btn" id="nameSave" type="submit">Gem navn</button>
+    </form>
+    <div class="namealt"><button class="linkbtn" id="nameSwitch" type="button">Har du allerede et navn? Log ind</button><button class="linkbtn" id="nameCancel" type="button" hidden>Annullér</button></div>
   </div>
 </div>
 
@@ -1857,14 +1866,74 @@ function sb(path, body) {
 }
 function lockName(n) {
   lockedName = n; const inp = $('pname'); inp.value = n; inp.readOnly = true; $('nameLock').hidden = false;
-  $('namePop').hidden = true; updateLobby();
+  $('namePop').hidden = true; updateLobby(); updateAcct();
 }
+function updateAcct() {
+  $('acct').hidden = !(lbOn() && lockedName && myPid);
+  $('setPwBtn').textContent = lsGet('kk-pw') ? 'Skift adgangskode' : 'Sæt adgangskode';
+}
+let popMode = 'new';
+const POP = {
+  new: ['Hvad skal du hedde?', 'Dit navn vises på leaderboards og i online-kampe. Med en adgangskode kan du logge ind igen i en anden browser.', 'Gem navn', 'Har du allerede et navn? Log ind'],
+  login: ['Log ind', 'Skriv dit navn og din adgangskode.', 'Log ind', 'Ny spiller? Vælg et navn'],
+  setpw: ['Adgangskode', '', 'Gem adgangskode', ''],
+};
 function needName() { if (lockedName) return false; if (lbInitDone) showNamePop(); return true; }
-function showNamePop() { $('namePop').hidden = false; setTimeout(() => $('nameIn').focus(), 50); }
-async function saveName() {
-  const n = ($('nameIn').value || '').trim().replace(/\s+/g, ' '), err = $('nameErr'), btn = $('nameSave');
+function showNamePop(mode = 'new') {
+  popMode = lbOn() ? mode : 'new';
+  const [title, intro, btn, sw] = POP[popMode];
+  $('nameTitle').textContent = title;
+  $('nameIntro').textContent = popMode === 'setpw' ? `Vælg en adgangskode til ${lockedName}, så du kan logge ind i andre browsere.` : lbOn() ? intro : 'Dit navn vises i online-kampe.';
+  $('nameSave').textContent = btn; $('nameSave').disabled = false;
+  $('nameSwitch').textContent = sw; $('nameSwitch').hidden = !sw || !lbOn() || !!lockedName;
+  $('nameCancel').hidden = !lockedName;
+  $('nameIn').hidden = popMode === 'setpw'; if (popMode === 'setpw') $('nameIn').value = lockedName;
+  const pw = $('pwIn'); pw.hidden = !lbOn(); pw.value = ''; pw.autocomplete = popMode === 'login' ? 'current-password' : 'new-password';
+  pw.placeholder = popMode === 'login' ? 'Adgangskode' : 'Adgangskode (mindst 6 tegn)';
+  $('nameErr').textContent = '';
+  $('namePop').hidden = false; setTimeout(() => (popMode === 'setpw' ? pw : $('nameIn')).focus(), 50);
+}
+const pwOk = p => p.length >= 6 && p.length <= 72;
+async function setPassword(pw) {
+  const res = await sb('rpc/set_password', { p_id: myPid, p_secret: mySecret, p_password: pw });
+  if (!res.ok || (await res.json().catch(() => false)) !== true) return false;
+  lsSet('kk-pw', '1'); return true;
+}
+async function doSetPw() {
+  const pw = $('pwIn').value, err = $('nameErr'), btn = $('nameSave');
   err.textContent = '';
-  if (!NAME_RE.test(n)) { err.textContent = 'Brug 2 til 14 tegn: bogstaver, tal, mellemrum, punktum eller bindestreg.'; return; }
+  if (!pwOk(pw)) { err.textContent = 'Adgangskoden skal være mindst 6 tegn.'; return; }
+  btn.disabled = true;
+  try {
+    if (await setPassword(pw)) { $('namePop').hidden = true; updateAcct(); $('nameLock').textContent = 'Adgangskode gemt. Du kan nu logge ind i andre browsere.'; }
+    else err.textContent = 'Adgangskoden kunne ikke gemmes. Prøv igen.';
+  } catch (e) { err.textContent = 'Ingen forbindelse. Prøv igen.'; }
+  btn.disabled = false;
+}
+async function doLogin() {
+  const n = ($('nameIn').value || '').trim().replace(/\s+/g, ' '), pw = $('pwIn').value, err = $('nameErr'), btn = $('nameSave');
+  err.textContent = '';
+  if (!n || !pw) { err.textContent = 'Skriv både navn og adgangskode.'; return; }
+  btn.disabled = true;
+  try {
+    const res = await sb('rpc/login_player', { p_name: n, p_password: pw });
+    const j = res.ok ? await res.json() : null;
+    if (!j) err.textContent = 'Login virker ikke lige nu. Prøv igen senere.';
+    else if (!j.ok) err.textContent = j.reason === 'locked' ? `For mange forkerte forsøg. Prøv igen om ${Math.max(1, Math.ceil((j.seconds || 60) / 60))} min.` : 'Forkert navn eller adgangskode.';
+    else {
+      myPid = j.id; mySecret = j.secret; myBest = null;
+      lsSet('kk-id', j.id); lsSet('kk-secret', j.secret); lsSet('kk-name', j.name); lsSet('kk-pw', '1');
+      $('nameLock').textContent = 'Dit navn er låst, så det passer med leaderboardet.';
+      lockName(j.name); loadBoards();
+    }
+  } catch (e) { err.textContent = 'Ingen forbindelse. Prøv igen.'; }
+  btn.disabled = false;
+}
+async function saveName(auto = false) {
+  const n = ($('nameIn').value || '').trim().replace(/\s+/g, ' '), pw = auto ? '' : $('pwIn').value, err = $('nameErr'), btn = $('nameSave');
+  err.textContent = '';
+  if (!NAME_RE.test(n)) { err.textContent = 'Brug 2 til 14 tegn: bogstaver, tal, mellemrum, punktum eller bindestreg.'; return false; }
+  if (lbOn() && !auto && !pwOk(pw)) { err.textContent = 'Vælg en adgangskode på mindst 6 tegn.'; return false; }
   btn.disabled = true;
   try {
     if (lbOn()) {
@@ -1877,6 +1946,7 @@ async function saveName() {
       }
       myPid = id; mySecret = secret; lsSet('kk-id', id); lsSet('kk-secret', secret);
       myBest = { d3: 0, d5: 0, d7: 0, k3: 0, k5: 0, k7: 0 };
+      if (pw) await setPassword(pw).catch(() => false);
     }
     lsSet('kk-name', n); lockName(n); loadBoards();
     btn.disabled = false; return true;
@@ -1938,11 +2008,14 @@ async function loadBoards() {
   else { $('lbNote').textContent = 'Henter leaderboard…'; loadBoards(); setInterval(() => { if (!$('menu').hidden) loadBoards(); }, 30000); }
   lbInitDone = true;
   if (saved && NAME_RE.test(saved) && (!lbOn() || myPid)) { lsSet('kk-name', saved); if (myPid) { lsSet('kk-id', myPid); lsSet('kk-secret', mySecret); } lockName(saved); }
-  else if (saved && NAME_RE.test(saved)) { $('nameIn').value = saved; saveName().then(ok => { if (!ok) showNamePop(); }); } // navn gemt før leaderboardet var sat op: registrér det automatisk
+  else if (saved && NAME_RE.test(saved)) { $('nameIn').value = saved; saveName(true).then(ok => { if (!ok) showNamePop(); }); } // navn gemt før leaderboardet var sat op: registrér det automatisk
   else showNamePop();
 })();
-$('nameSave').onclick = saveName;
-$('nameIn').addEventListener('keydown', e => { if (e.key === 'Enter') saveName(); });
+$('nameForm').addEventListener('submit', e => { e.preventDefault(); if (popMode === 'login') doLogin(); else if (popMode === 'setpw') doSetPw(); else saveName(); });
+$('nameSwitch').onclick = () => showNamePop(popMode === 'login' ? 'new' : 'login');
+$('nameCancel').onclick = () => { $('namePop').hidden = true; };
+$('setPwBtn').onclick = () => showNamePop('setpw');
+$('switchBtn').onclick = () => showNamePop('login');
 
 // ---------- Loop ----------
 let camYaw = 0, last = performance.now();
