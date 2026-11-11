@@ -543,6 +543,23 @@ const MAPS = {
     crown: [9, -3],
   },
 };
+// banerne er tegnet i en mindre målestok: skalér dem ud i bredden (højder uændret) og gør hullerne mindre
+const MAP_SCALE = 1.25, HOLE_SHRINK = 0.8;
+for (const M of Object.values(MAPS)) {
+  const f = MAP_SCALE, P = ([x, z, ...r]) => [x * f, z * f, ...r];
+  M.floors = M.floors.map(F => F.map(P));
+  M.holes = (M.holes || []).map(h => {
+    if (typeof h[0] === 'number') return [h[0] * f, h[1] * f, h[2] * HOLE_SHRINK];
+    const cx = h.reduce((a, q) => a + q[0], 0) / h.length, cz = h.reduce((a, q) => a + q[1], 0) / h.length;
+    return h.map(([x, z]) => [(cx + (x - cx) * HOLE_SHRINK) * f, (cz + (z - cz) * HOLE_SHRINK) * f]);
+  });
+  M.plats = (M.plats || []).map(([x, z, hw, hd, h, a]) => [x * f, z * f, hw * f, hd * f, h, a]);
+  M.ramps = (M.ramps || []).map(([x1, z1, x2, z2, w, h0, h1]) => [x1 * f, z1 * f, x2 * f, z2 * f, w, h0, h1]);
+  M.bridges = (M.bridges || []).map(([x1, z1, x2, z2, w, h]) => [x1 * f, z1 * f, x2 * f, z2 * f, w, h]);
+  M.lows = (M.lows || []).map(([x, z, a, len]) => [x * f, z * f, a, len * f]);
+  for (const k of ['pillars', 'pads', 'boxes', 'spawns']) M[k] = (M[k] || []).map(P);
+  if (M.crown) M.crown = P(M.crown);
+}
 const qTex = canvasTex(128, (g, s) => {
   const gr = g.createLinearGradient(0, 0, s, s); gr.addColorStop(0, '#ff3d6e'); gr.addColorStop(1, '#ffb13d');
   g.fillStyle = gr; g.fillRect(0, 0, s, s); g.strokeStyle = 'rgba(255,255,255,.85)'; g.lineWidth = 8; g.strokeRect(8, 8, s - 16, s - 16);
@@ -587,12 +604,22 @@ function buildMap(key) {
   const c = document.createElement('canvas'); c.width = 4; c.height = 256; const g = c.getContext('2d');
   const gr = g.createLinearGradient(0, 0, 0, 256); gr.addColorStop(0, MAP.sky[0]); gr.addColorStop(0.6, MAP.sky[1]); gr.addColorStop(1, MAP.sky[2]);
   g.fillStyle = gr; g.fillRect(0, 0, 4, 256); scene.background = new THREE.CanvasTexture(c);
-  scene.fog = new THREE.Fog(MAP.fog, 95, 210);
+  scene.fog = new THREE.Fog(MAP.fog, 110, 260);
   Object.assign(sun.shadow.camera, { left: -R - 6, right: R + 6, top: R + 6, bottom: -R - 6 }); sun.shadow.camera.updateProjectionMatrix();
   // gulvflader med klippekanter og huller
   const ft = canvasTex(256, (g) => { g.fillStyle = MAP.floor[0]; g.fillRect(0, 0, 256, 256); g.fillStyle = MAP.floor[1]; g.fillRect(0, 0, 128, 128); g.fillRect(128, 128, 128, 128); g.strokeStyle = MAP.floor[2]; g.lineWidth = 2; g.strokeRect(1, 1, 254, 254); });
   ft.wrapS = ft.wrapT = THREE.RepeatWrapping; ft.repeat.set(1 / 8, 1 / 8);
-  const icy = MAP.grip > 0.01, floorM = new THREE.MeshStandardMaterial({ map: ft, roughness: icy ? 0.3 : 0.95, metalness: icy ? 0.15 : 0 }), cliffM = mat(MAP.cliff);
+  const CD = 26, cb = new THREE.Color(MAP.cliff); // klippevæggenes dybde: man kan se dem gå langt ned i hullerne
+  const cliffTex = canvasTex(128, (g, s) => {
+    const css = (m) => `rgb(${Math.round(cb.r * 255 * m)},${Math.round(cb.g * 255 * m)},${Math.round(cb.b * 255 * m)})`;
+    const gr = g.createLinearGradient(0, 0, 0, s); gr.addColorStop(0, css(0.12)); gr.addColorStop(0.75, css(0.6)); gr.addColorStop(1, css(1.05));
+    g.fillStyle = gr; g.fillRect(0, 0, s, s);
+    g.fillStyle = 'rgba(0,0,0,.22)'; for (let y = s - 3; y > 0; y -= 7 + (y % 5)) g.fillRect(0, y, s, 2); // klippelag
+    g.fillStyle = 'rgba(255,255,255,.18)'; g.fillRect(0, s - 4, s, 4); // lys kant øverst
+  });
+  cliffTex.wrapS = THREE.RepeatWrapping; cliffTex.wrapT = THREE.ClampToEdgeWrapping; cliffTex.repeat.set(1 / 8, 1 / CD); cliffTex.offset.y = 1 - 1 / CD;
+  const icy = MAP.grip > 0.01, floorM = new THREE.MeshStandardMaterial({ map: ft, roughness: icy ? 0.3 : 0.95, metalness: icy ? 0.15 : 0 });
+  const cliffM = new THREE.MeshStandardMaterial({ map: cliffTex, roughness: 1, flatShading: true });
   for (const P of floors) {
     const sh = new THREE.Shape(P.map(([x, z]) => new THREE.Vector2(x, -z)));
     for (const h of holes) {
@@ -600,8 +627,16 @@ function buildMap(key) {
       const path = new THREE.Path(); if (h.r) path.absarc(h.x, -h.z, h.r, 0, TAU, true); else h.p.forEach(([x, z], i) => i ? path.lineTo(x, -z) : path.moveTo(x, -z));
       sh.holes.push(path);
     }
-    const m = madd(mesh(new THREE.ExtrudeGeometry(sh, { depth: 5, bevelEnabled: false, curveSegments: 24 }), [floorM, cliffM], false, true));
-    m.rotation.x = -Math.PI / 2; m.position.y = -5;
+    const m = madd(mesh(new THREE.ExtrudeGeometry(sh, { depth: CD, bevelEnabled: false, curveSegments: 32 }), [floorM, cliffM], false, true));
+    m.rotation.x = -Math.PI / 2; m.position.y = -CD;
+  }
+  // farvet kantlinje langs alle kanter man kan falde ud over (huller og kanter uden rækværk)
+  const rimM = mat(MAP.rim || MAP.wall[1], { emissive: MAP.rim || MAP.wall[1], emissiveIntensity: 0.35 });
+  const rim = (x1, z1, x2, z2) => { const dx = x2 - x1, dz = z2 - z1, len = Math.hypot(dx, dz), m = madd(mesh(bx(len + 0.3, 0.06, 0.6), rimM, false, false)); m.position.set((x1 + x2) / 2, 0.03, (z1 + z2) / 2); m.rotation.y = Math.atan2(-dz, dx); };
+  floors.forEach((P, fi) => { const rl = (MAP.rails || [])[fi] || []; P.forEach((a, i) => { if (!rl.includes(i)) { const b = P[(i + 1) % P.length]; rim(a[0], a[1], b[0], b[1]); } }); });
+  for (const h of holes) {
+    if (h.r) { const m = madd(new THREE.Mesh(new THREE.RingGeometry(h.r - 0.3, h.r + 0.05, 48), rimM)); m.rotation.x = -Math.PI / 2; m.position.set(h.x, 0.03, h.z); }
+    else h.p.forEach((a, i) => { const b = h.p[(i + 1) % h.p.length]; rim(a[0], a[1], b[0], b[1]); });
   }
   // afgrunden
   const ab = madd(new THREE.Mesh(new THREE.CircleGeometry(420, 40), new THREE.MeshStandardMaterial({ color: MAP.abyss, emissive: MAP.abyssGlow || 0, roughness: 1 })));
