@@ -1842,8 +1842,11 @@ const SUPABASE_ANON_KEY = 'sb_publishable_81koFQabEq_jWl2LhxVpgw_3ZjS3twQ';  // 
 let lockedName = '', myBest = null, lbInitDone = false, myPid = '', mySecret = '';
 const NAME_RE = /^[A-Za-z0-9ÆØÅæøåÄÖÜäöüé _.-]{2,14}$/;
 const lbOn = () => !!(SUPABASE_URL && SUPABASE_ANON_KEY);
-const lsGet = k => { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } };
-const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) { } };
+// Gemmes både i localStorage og en cookie, så navnet huskes selv hvis den ene er blokeret/ryddet.
+const ckGet = k => { try { const m = document.cookie.match('(?:^|; )' + k + '=([^;]*)'); return m ? decodeURIComponent(m[1]) : ''; } catch (e) { return ''; } };
+const ckSet = (k, v) => { try { document.cookie = `${k}=${encodeURIComponent(v)}; max-age=${60 * 60 * 24 * 400}; path=/; SameSite=Lax`; } catch (e) { } };
+const lsGet = k => { let v = ''; try { v = localStorage.getItem(k) || ''; } catch (e) { } if (!v) { v = ckGet(k); if (v) try { localStorage.setItem(k, v); } catch (e) { } } return v; };
+const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) { } ckSet(k, v); };
 const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => { const r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 3 | 8)).toString(16); }));
 function sb(path, body) {
   return fetch(SUPABASE_URL.replace(/\/$/, '') + '/rest/v1/' + path, {
@@ -1870,14 +1873,15 @@ async function saveName() {
       if (!res.ok) {
         const j = await res.json().catch(() => ({}));
         err.textContent = j.code === '23505' ? 'Det navn er taget. Vælg et andet.' : 'Navnet kunne ikke gemmes. Prøv igen.';
-        btn.disabled = false; return;
+        btn.disabled = false; return false;
       }
       myPid = id; mySecret = secret; lsSet('kk-id', id); lsSet('kk-secret', secret);
       myBest = { d3: 0, d5: 0, d7: 0, k3: 0, k5: 0, k7: 0 };
     }
     lsSet('kk-name', n); lockName(n); loadBoards();
+    btn.disabled = false; return true;
   } catch (e) { err.textContent = 'Ingen forbindelse til leaderboardet. Prøv igen.'; }
-  btn.disabled = false;
+  btn.disabled = false; return false;
 }
 async function submitScore(dmg, kills, mins) {
   if (!lbOn() || !myPid || ![3, 5, 7].includes(mins)) return;
@@ -1933,7 +1937,9 @@ async function loadBoards() {
   if (!lbOn()) $('lbNote').textContent = 'Leaderboardet er ikke sat op endnu.';
   else { $('lbNote').textContent = 'Henter leaderboard…'; loadBoards(); setInterval(() => { if (!$('menu').hidden) loadBoards(); }, 30000); }
   lbInitDone = true;
-  if (saved && NAME_RE.test(saved) && (!lbOn() || myPid)) lockName(saved); else showNamePop();
+  if (saved && NAME_RE.test(saved) && (!lbOn() || myPid)) { lsSet('kk-name', saved); if (myPid) { lsSet('kk-id', myPid); lsSet('kk-secret', mySecret); } lockName(saved); }
+  else if (saved && NAME_RE.test(saved)) { $('nameIn').value = saved; saveName().then(ok => { if (!ok) showNamePop(); }); } // navn gemt før leaderboardet var sat op: registrér det automatisk
+  else showNamePop();
 })();
 $('nameSave').onclick = saveName;
 $('nameIn').addEventListener('keydown', e => { if (e.key === 'Enter') saveName(); });
