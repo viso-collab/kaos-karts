@@ -62,3 +62,8 @@ revoke all on function public.set_password(uuid, text, text) from public;
 revoke all on function public.login_player(text, text) from public;
 grant execute on function public.set_password(uuid, text, text) to anon, authenticated;
 grant execute on function public.login_player(text, text) to anon, authenticated;
+
+-- Viewet kører nu som ejer (uden om RLS), så det må kun kunne læses offentligt.
+-- Ellers kunne alle med den offentlige nøgle rette/slette spillere gennem viewet.
+revoke insert, update, delete, truncate, references, trigger on public.leaderboard from anon, authenticated;
+grant select on public.leaderboard to anon, authenticated;
