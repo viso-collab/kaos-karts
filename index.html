@@ -68,6 +68,8 @@ html,body{height:100%;margin:0;background:var(--ink);color:var(--text);font-fami
 #wname{font:20px var(--display);margin:2px 0;color:var(--volt)}
 #weapon.empty #wname{color:var(--muted);font-size:15px}
 #wsub{font-size:12px;color:var(--muted)}
+#wnext{margin-top:6px;padding-top:5px;border-top:1px solid var(--line);font-size:12px;color:var(--text)}
+#wnext b{color:var(--volt);font-weight:600}
 #weapon.flash{animation:pop .35s ease-out}
 @keyframes pop{0%{transform:scale(1.15)}100%{transform:scale(1)}}
 
@@ -227,7 +229,7 @@ tr.me td{background:rgba(255,210,63,.12);font-weight:700}
   <div id="bottom">
     <div class="ab" id="abDash"><div><span class="n">Dash</span><span class="k">Q</span></div></div>
     <div class="ab" id="abJump"><div><span class="n">Hop</span><span class="k">E</span></div></div>
-    <div id="weapon" class="box empty"><div class="wkey">Shift</div><div id="wname">Intet våben</div><div id="wsub">Kør gennem en ?-kasse</div></div>
+    <div id="weapon" class="box empty"><div class="wkey">Shift</div><div id="wname">Intet våben</div><div id="wsub">Kør gennem en ?-kasse</div><div id="wnext" hidden></div></div>
     <div class="ab" id="abDrift"><div><span class="n">Drift</span><span class="k">Space</span></div></div>
   </div>
   <div id="hint">Esc pause · M lyd</div>
@@ -327,7 +329,7 @@ tr.me td{background:rgba(255,210,63,.12);font-weight:700}
     <div class="lbl">Indstillinger</div>
     <div class="sets">
       <label for="selMode">Spiltilstand<select id="selMode"><option value="kills">Flest kills</option><option value="crown">Keep the Crown</option></select></label>
-      <label for="selMap">Bane<select id="selMap"><option value="arena">Regnbuearenaen</option><option value="desert">Ørkenkløften</option><option value="frost">Frostskoven</option></select></label>
+      <label for="selMap">Bane<select id="selMap"></select></label>
       <label for="selTime">Spilletid<select id="selTime"><option value="3">3 min</option><option value="5">5 min</option><option value="7">7 min</option></select></label>
     </div>
     <p id="lobbyWait"></p>
@@ -382,9 +384,11 @@ const WEAPONS = {
   blink:  { name: 'Teleport', ammo: 2, sub: 'Spring 14 meter frem' },
   lightning: { name: 'Lyn', ammo: 1, sub: 'Rammer den der fører' },
   turbo:  { name: 'Turbo', ammo: 1, sub: '3 sek. fart, ramning skader' },
+  push:   { name: 'Skubbebølge', ammo: 2, sub: 'Blæser alle foran dig langt væk' },
+  hook:   { name: 'Krog', ammo: 2, sub: 'Træk en fjende hen til dig · ram en væg: træk dig selv derhen' },
 };
-const TIMERS = ['fireCd', 'dashCd', 'jumpCd', 'dashT', 'boostT', 'shieldT', 'invulnT', 'flashT', 'ramCd', 'spinT', 'slowT', 'turboT', 'spinImmune', 'dboostT', 'frozenT'];
-const RESET = { superT: 0, slamming: false, driftT: 0, driftDir: 0, spinT: 0, slowT: 0, turboT: 0, spinImmune: 0, dboostT: 0, dboostKick: 0, wStage: 0, wT: 0, charge: 0, frozenT: 0, boomProj: null, slamMult: 1 };
+const TIMERS = ['fireCd', 'dashCd', 'jumpCd', 'dashT', 'boostT', 'shieldT', 'invulnT', 'flashT', 'ramCd', 'spinT', 'slowT', 'turboT', 'spinImmune', 'dboostT', 'frozenT', 'knockT'];
+const RESET = { knockT: 0, superT: 0, slamming: false, driftT: 0, driftDir: 0, spinT: 0, slowT: 0, turboT: 0, spinImmune: 0, dboostT: 0, dboostKick: 0, wStage: 0, wT: 0, charge: 0, frozenT: 0, boomProj: null, slamMult: 1 };
 const WKEYS = Object.keys(WEAPONS);
 
 // ---------- Renderer ----------
@@ -419,63 +423,124 @@ function canvasTexBg() {
 function canvasTex(size, draw) { const c = document.createElement('canvas'); c.width = c.height = size; draw(c.getContext('2d'), size); const t = new THREE.CanvasTexture(c); t.anisotropy = 4; return t; }
 
 // ---------- Baner ----------
-const pillars = [], lows = [], pads = [], boxes = [], spawns = [];
+// Terræn: gulvflader (polygoner) i højde 0 med huller, plus "solids": platforme, broer og ramper
+// (drejede kasser hvis top kan hælde). Er der intet under en, falder man, og under FALL_Y er man død.
+const pillars = [], lows = [], pads = [], boxes = [], spawns = [], solids = [], rails = [];
+let floors = [], holes = [], miniBg = null;
 let mapGroup = null, MAP = null;
+const STEP = 0.8, KH = 1.4, VOID = -1e9, FALL_Y = -14;
 const madd = (o) => { mapGroup.add(o); return o; };
+function inPoly(x, z, P) {
+  let c = false;
+  for (let i = 0, j = P.length - 1; i < P.length; j = i++) {
+    const xi = P[i][0], zi = P[i][1], xj = P[j][0], zj = P[j][1];
+    if ((zi > z) !== (zj > z) && x < (xj - xi) * (z - zi) / (zj - zi) + xi) c = !c;
+  }
+  return c;
+}
+function onFloor(x, z) {
+  let f = false; for (const P of floors) if (inPoly(x, z, P)) { f = true; break; }
+  if (!f) return false;
+  for (const h of holes) if (h.r ? Math.hypot(x - h.x, z - h.z) < h.r : inPoly(x, z, h.p)) return false;
+  return true;
+}
+function sLocal(s, x, z) { const dx = x - s.x, dz = z - s.z; return [dx * s.ca - dz * s.sa, dx * s.sa + dz * s.ca]; }
+const sTop = (s, v) => s.h0 + (s.h1 - s.h0) * clamp((v + s.hd) / (2 * s.hd), 0, 1);
+// højeste overflade ved (x,z) som noget i højde y kan stå på (VOID = afgrund)
+function groundAt(x, z, y) {
+  let g = y + STEP >= 0 && onFloor(x, z) ? 0 : VOID;
+  for (const s of solids) {
+    const [u, v] = sLocal(s, x, z); if (u > s.hw || u < -s.hw || v > s.hd || v < -s.hd) continue;
+    const t = sTop(s, v); if (t <= y + STEP && t > g) g = t;
+  }
+  return g;
+}
+const topAt = (x, z) => { const g = groundAt(x, z, 1e3); return g > VOID ? g : 0; };
+const air = k => k.y - (k.gh > VOID ? k.gh : -1e3);
 const circ = (n, r, off = 0) => Array.from({ length: n }, (_, k) => { const a = k / n * TAU + off; return [Math.sin(a) * r, Math.cos(a) * r, a]; });
+// plats: [x, z, halv bredde (x), halv dybde (z), højde, drejning]
+// ramps: [x1, z1, x2, z2, bredde, højde ved 1, højde ved 2]   bridges: [x1, z1, x2, z2, bredde, højde] (tynde, man kan køre under)
+// pads: [x, z, kørselsretning]   rails: kanter med rækværk, pr. gulvflade (kant i går fra punkt i til i+1)
 const MAPS = {
-  arena: {
-    name: 'Regnbuearenaen', desc: 'Søjler, hoppemure og boost-pads',
-    R: 60, grip: 0.0005, sky: ['#5fb8ff', '#a6dcff', '#e4f5ff'], fog: 0xbfe6ff, floor: ['#7f74d6', '#8d83e0', 'rgba(255,255,255,.25)'],
-    ground: 0x5cc46e, wall: [0xffffff, 0xff5fa2], pillar: 'column', low: 'hazard', decor: 'tires',
-    pillarCols: [0x7b61ff, 0xff7a59, 0x3ed6b0, 0x5aa9ff, 0xffb13d, 0xff5fa2, 0x9b6bff],
-    marks: [[9.6, 10.1, 0xffd23f, 0.8], [23.6, 23.9, 0xffffff, 0.12]],
-    layout(L) {
-      L.pillars.push({ x: 0, z: 0, r: 4.5, h: 7, big: true });
-      for (const [x, z] of circ(6, 31, TAU / 12)) L.pillars.push({ x, z, r: 2.3, h: 5 });
-      for (const [x, z, a] of circ(4, 17)) L.lows.push([x, z, a, 12]);
-      for (const [x, z, a] of circ(4, 46, TAU / 8)) L.lows.push([x, z, a, 11]);
-      for (const [x, z, a] of circ(4, 36, TAU / 8)) L.pads.push([x, z, a]);
-      for (const [x, z] of circ(8, 24, TAU / 16)) L.boxes.push([x, z]);
-      for (const [x, z] of circ(4, 41)) L.boxes.push([x, z]);
-      for (const [x, z, a] of circ(8, 52, TAU / 16)) L.spawns.push({ x, z, a: a + Math.PI });
-    },
+  bygge: {
+    name: 'Byggepladsen', desc: 'Stilladser, ramper, et hul med en smal bro og et hop over grøften',
+    grip: 0.0005, sky: ['#5fb8ff', '#a6dcff', '#e4f5ff'], fog: 0xbfe6ff, floor: ['#7f74d6', '#8d83e0', 'rgba(255,255,255,.25)'],
+    cliff: 0x4b3f8f, ground: 0x5cc46e, abyss: 0x2a2366, wall: [0xffffff, 0xff5fa2], pillar: 'column', low: 'hazard', decor: 'tires',
+    plat: [0xb7aef5, 0x5a4fb0], ramp: ['#ffd23f', '#1b1f30'], pillarCols: [0x7b61ff, 0xff7a59, 0x3ed6b0, 0x5aa9ff, 0xffb13d, 0xff5fa2],
+    floors: [[[-48, -40], [10, -46], [38, -30], [50, -6], [44, 22], [20, 30], [16, 50], [-14, 52], [-34, 36], [-52, 8]]],
+    rails: [[0, 2, 3, 6, 8]],
+    holes: [[-14, -8, 8.5], [[-6, 26], [13, 24], [14, 34], [-5, 37]]],
+    plats: [[24, -14, 7, 6, 3.4], [27, -16, 3.2, 3.2, 6], [-36, 10, 5, 6, 2.2, 0.5]],
+    ramps: [[3, -14, 17, -14, 5, 0, 3.4], [24, 6, 24, -8, 5, 0, 3.4], [4, 10, 4, 20, 5, 0, 2.6]],
+    bridges: [[-25, -8, -3, -8, 4, 0]],
+    pillars: [[-34, -22, 2.3, 5], [36, 10, 2.3, 5], [-20, 30, 2.3, 5], [10, -30, 2, 4.5]],
+    lows: [[-28, -30, 0.5, 10], [30, 20, -0.3, 9], [-40, -10, 1.3, 9]],
+    pads: [[4, 4, 0], [-31, -8, Math.PI / 2], [-10, -34, Math.PI / 2]],
+    boxes: [[-14, -8], [27, -16], [20, -10], [4, 44], [-36, 10], [-38, 22], [36, -2], [-6, -36], [24, 22], [-22, 36]],
+    spawns: [[-40, -30], [0, -40], [36, -24], [44, 6], [30, 24], [8, 48], [-28, 38], [-46, 0]],
+    crown: [20, -10],
   },
-  desert: {
-    name: 'Ørkenkløften', desc: 'Stor åben bane med klipper og træhegn',
-    R: 66, grip: 0.0008, sky: ['#ff8a5c', '#ffc48a', '#ffe9c8'], fog: 0xffdcb0, floor: ['#e9b46a', '#efc17d', 'rgba(255,255,255,.18)'],
-    ground: 0xd99a55, wall: [0xfff1d6, 0xe8603c], pillar: 'rock', low: 'wood', decor: 'cacti',
-    pillarCols: [0xc8743f, 0xb5643a, 0xd98a4e],
-    marks: [[11.6, 12.1, 0xffffff, 0.5]],
-    layout(L) {
-      for (const [x, z] of circ(5, 21, TAU / 10)) L.pillars.push({ x, z, r: 2.8, h: 4.5 });
-      for (const [x, z] of circ(7, 45, 0.2)) L.pillars.push({ x, z, r: 3.3, h: 6 });
-      for (const [x, z, a] of circ(6, 32)) L.lows.push([x, z, a + Math.PI / 2, 10]);
-      for (const [x, z, a] of circ(4, 7, TAU / 8)) L.pads.push([x, z, a]);
-      for (const [x, z, a] of circ(3, 54, TAU / 6)) L.pads.push([x, z, a]);
-      for (const [x, z] of circ(6, 32, TAU / 12)) L.boxes.push([x, z]);
-      for (const [x, z] of circ(5, 13)) L.boxes.push([x, z]);
-      for (const [x, z] of circ(4, 52, TAU / 8 + 0.3)) L.boxes.push([x, z]);
-      for (const [x, z, a] of circ(8, 59, TAU / 16)) L.spawns.push({ x, z, a: a + Math.PI });
-    },
+  kloeft: {
+    name: 'Kløften', desc: 'To klippeplateauer over lava. Broer, et stort hop og et højt plateau',
+    grip: 0.0008, sky: ['#ff8a5c', '#ffc48a', '#ffe9c8'], fog: 0xffdcb0, floor: ['#e9b46a', '#efc17d', 'rgba(255,255,255,.18)'],
+    cliff: 0xb5643a, ground: 0xd99a55, abyss: 0xff5a1f, abyssGlow: 0xff3a00, wall: [0xfff1d6, 0xe8603c], pillar: 'rock', low: 'wood', decor: 'cacti',
+    plat: [0xe8a465, 0xa8572f], ramp: ['#fff1d6', '#c8743f'], pillarCols: [0xc8743f, 0xb5643a, 0xd98a4e],
+    floors: [
+      [[-56, -30], [-30, -50], [-6, -48], [4, -20], [-6, 6], [-2, 30], [-20, 50], [-48, 40], [-60, 10]],
+      [[14, -50], [44, -40], [58, -12], [52, 20], [34, 48], [10, 52], [8, 26], [18, 2], [14, -22]],
+    ],
+    rails: [[0, 1, 6, 8], [0, 2, 4]],
+    holes: [[-30, 20, 6]],
+    plats: [[36, -8, 8, 8, 4], [-34, -20, 6, 5, 2.4], [30, 30, 4, 4, 2.2]],
+    ramps: [[36, -32, 36, -16, 6, 0, 4], [-34, -34, -34, -25, 4.5, 0, 2.4], [-20, 4, -7, 4, 5, 0, 4.2]],
+    bridges: [[0, -20, 18, -20, 5, 0], [-5, 30, 12, 30, 4.5, 0]],
+    pillars: [[-40, 24, 2.6, 4.5], [-14, -36, 2.6, 4.5], [46, 8, 2.6, 4.5], [22, 40, 2.6, 4.5], [-50, -6, 2.6, 4.5], [48, -24, 2.6, 4.5]],
+    lows: [[-20, -30, 0.8, 10], [-38, 34, 0.2, 9], [42, 30, 1.2, 8]],
+    pads: [[-26, 4, Math.PI / 2], [36, -38, 0], [-14, 38, Math.PI / 2]],
+    boxes: [[40, -12], [-34, -20], [9, -20], [3, 30], [-46, 20], [-20, -42], [30, 30], [48, -4], [26, 16], [-12, 14]],
+    spawns: [[-50, -24], [-24, -44], [-16, -6], [-36, 40], [-50, 4], [24, -40], [50, 0], [20, 46], [30, 8]],
+    crown: [33, -6],
   },
-  frost: {
-    name: 'Frostskoven', desc: 'Glat is og tæt granskov. Perfekt til drift',
-    R: 56, grip: 0.03, sky: ['#7fb6e8', '#c7e2f7', '#f2f9ff'], fog: 0xdbeefa, floor: ['#cfe6f5', '#bcdcf0', 'rgba(255,255,255,.6)'],
-    ground: 0xf4f8fb, wall: [0xffffff, 0x3a86ff], pillar: 'tree', low: 'snow', decor: 'trees',
-    pillarCols: [0x2f9e6b, 0x268a5c, 0x37b07a],
-    marks: [[7.6, 8.1, 0x3a86ff, 0.5], [30.6, 31, 0xffffff, 0.5]],
-    layout(L) {
-      for (const gx of [-40, -24, -8, 8, 24, 40]) for (const gz of [-40, -24, -8, 8, 24, 40]) {
-        const d = Math.hypot(gx, gz); if (d < 12 || d > 44) continue;
-        L.pillars.push({ x: gx + (gz % 16 === 8 ? 3 : -3), z: gz, r: 1.6, h: 6 });
-      }
-      for (const [x, z, a] of circ(4, 31, TAU / 8)) L.lows.push([x, z, a, 9]);
-      for (const [x, z, a] of circ(4, 20)) L.pads.push([x, z, a]);
-      for (const [x, z] of circ(8, 15, TAU / 16)) L.boxes.push([x, z]);
-      for (const [x, z] of circ(4, 39)) L.boxes.push([x, z]);
-      for (const [x, z, a] of circ(8, 50, TAU / 16)) L.spawns.push({ x, z, a: a + Math.PI });
-    },
+  isflager: {
+    name: 'Isflagerne', desc: 'Glatte isflager i havet. Smalle broer og hop mellem flagerne',
+    grip: 0.03, sky: ['#7fb6e8', '#c7e2f7', '#f2f9ff'], fog: 0xdbeefa, floor: ['#cfe6f5', '#bcdcf0', 'rgba(255,255,255,.6)'],
+    cliff: 0x9cc9e8, ground: 0xf4f8fb, abyss: 0x1d5c8f, wall: [0xffffff, 0x3a86ff], pillar: 'tree', low: 'snow', decor: 'trees',
+    plat: [0xe8f4ff, 0x8fbfe0], ramp: ['#ffffff', '#3a86ff'], pillarCols: [0x2f9e6b, 0x268a5c, 0x37b07a],
+    floors: [
+      [[-18, -14], [4, -22], [20, -10], [18, 12], [0, 20], [-20, 10]],
+      [[-52, 8], [-34, 0], [-26, 18], [-36, 38], [-54, 30]],
+      [[22, 20], [44, 14], [56, 34], [40, 50], [20, 42]],
+      [[-24, -50], [6, -54], [24, -40], [10, -30], [-16, -30]],
+      [[24, -30], [50, -26], [56, -2], [36, 4], [24, -10]],
+    ],
+    rails: [[], [3, 4], [1, 2], [0], [1]],
+    plats: [[-44, 24, 5, 5, 3], [44, 34, 5, 5, 2.4, 0.4]],
+    ramps: [[4, 4, 14, 12, 5, 0, 3], [-44, 10, -44, 19, 4, 0, 3], [8, -42, 15, -35, 4.5, 0, 2.5]],
+    bridges: [[-35, 10, -15, 0, 4, 0], [-4, -14, -4, -34, 4.5, 0], [16, -6, 30, -10, 4.5, 0], [47, -2, 40, 17, 4, 0]],
+    pillars: [[-12, -8, 1.6, 6], [10, -14, 1.6, 6], [-40, 32, 1.6, 6], [30, 36, 1.6, 6], [48, 24, 1.6, 6], [-14, -42, 1.6, 6], [2, -48, 1.6, 6], [44, -14, 1.6, 6]],
+    lows: [[-6, 10, 0.3, 6], [36, 40, 0.8, 7], [-12, -38, 0.2, 7]],
+    pads: [[-1, 0, 0.9], [4, -46, Math.PI / 4]],
+    boxes: [[2, -4], [-44, 24], [44, 34], [-6, -44], [36, -18], [30, 30], [-42, 16], [-4, -24], [8, 12]],
+    spawns: [[-10, 0], [6, -10], [-48, 14], [-36, 28], [34, 28], [36, 44], [-2, -44], [10, -44], [40, -16], [48, -6]],
+    crown: [-6, 0],
+  },
+  neon: {
+    name: 'Neontårnet', desc: 'Tårn i tre etager, en høj bro og huller i gulvet',
+    grip: 0.0005, sky: ['#120d36', '#2b1d6b', '#6b3fa8'], fog: 0x2b1d6b, floor: ['#231d5c', '#2a236b', 'rgba(70,240,255,.45)'],
+    cliff: 0x1a1446, ground: 0x2a236b, abyss: 0x0b0720, abyssGlow: 0x1a0640, wall: [0x46d9ff, 0xff3dbb], pillar: 'column', low: 'hazard', decor: 'neon', glow: true,
+    plat: [0x3b2f8f, 0x231d5c], ramp: ['#46d9ff', '#231d5c'], pillarCols: [0xff3dbb, 0x46d9ff, 0xffd23f, 0x7b61ff],
+    floors: [[[-50, -20], [-36, -46], [-4, -52], [24, -44], [50, -26], [54, 4], [40, 34], [14, 50], [-18, 48], [-44, 30], [-56, 4]]],
+    rails: [[1, 3, 4, 7, 9]],
+    holes: [[-32, -24, 7], [-26, 26, 7.5], [30, 24, 5.5]],
+    plats: [[6, -4, 12, 10, 2.4], [10, -6, 6, 4, 5], [14, -8, 2, 2, 7.6], [40, -8, 6, 6, 5], [-38, 0, 5, 5, 4.5]],
+    ramps: [[-18, 0, -6, 0, 5, 0, 2.4], [12, -28, 12, -14, 5, 0, 2.4], [-4, -6, 4, -6, 4, 2.4, 5], [40, 16, 40, -2, 5, 0, 5], [-38, -16, -38, -5, 4.5, 0, 4.5]],
+    bridges: [[16, -6, 34, -6, 3.5, 5], [-36, 26, -16, 26, 4, 0]],
+    pillars: [[-20, -30, 2.3, 5], [24, -30, 2.3, 5], [-40, 14, 2.3, 5], [26, 36, 2.3, 5], [-6, 34, 2.3, 5], [46, -20, 2.3, 5]],
+    lows: [[-14, -38, 0.2, 10], [30, 10, 1.4, 8], [-48, 18, 2.2, 8]],
+    pads: [[-24, 0, Math.PI / 2], [12, -34, 0], [40, 22, Math.PI]],
+    boxes: [[6, -9], [14, -8], [40, -8], [-38, 0], [-26, 26], [0, -40], [44, 16], [-10, 40], [-46, -14], [20, 40]],
+    spawns: [[-40, -30], [-10, -46], [28, -34], [48, -6], [40, 23], [0, 44], [-30, 36], [-50, 4], [-20, 12]],
+    crown: [9, -3],
   },
 };
 const qTex = canvasTex(128, (g, s) => {
@@ -503,74 +568,114 @@ function treeMesh(x, z, r, h, col) {
     const sn = mesh(new THREE.ConeGeometry(r * (0.7 - i * 0.15), h * 0.15, 7), mat(0xffffff)); sn.position.y = h * (0.52 + i * 0.2); g.add(sn); }
   return g;
 }
+function addSolid(x, z, a, hw, hd, h0, h1, b, kind) { solids.push({ x, z, a, sa: Math.sin(a), ca: Math.cos(a), hw, hd, h0, h1, b, kind }); }
+function addSeg(x1, z1, x2, z2, w, h0, h1, b, kind) { addSolid((x1 + x2) / 2, (z1 + z2) / 2, Math.atan2(x2 - x1, z2 - z1), w / 2, Math.hypot(x2 - x1, z2 - z1) / 2, h0, h1, b, kind); }
+function centroid(P) { let x = 0, z = 0; for (const p of P) { x += p[0]; z += p[1]; } return [x / P.length, z / P.length]; }
 function buildMap(key) {
-  MAP = MAPS[key]; R = MAP.R;
+  MAP = MAPS[key];
   if (mapGroup) scene.remove(mapGroup);
   mapGroup = new THREE.Group(); scene.add(mapGroup);
-  pillars.length = lows.length = pads.length = boxes.length = spawns.length = 0;
-  const L = { pillars, lows: [], pads: [], boxes: [], spawns }; MAP.layout(L);
+  pillars.length = lows.length = pads.length = boxes.length = spawns.length = solids.length = rails.length = 0;
+  floors = MAP.floors; holes = (MAP.holes || []).map(h => typeof h[0] === 'number' ? { x: h[0], z: h[1], r: h[2] } : { p: h });
+  R = 0; for (const P of floors) for (const [x, z] of P) R = Math.max(R, Math.hypot(x, z)); R = Math.ceil(R + 2);
+  miniBg = null;
+  for (const [x, z, hw, hd, h, a = 0] of MAP.plats || []) addSolid(x, z, a, hw, hd, h, h, -3, 'plat');
+  for (const [x1, z1, x2, z2, w, h0, h1] of MAP.ramps || []) addSeg(x1, z1, x2, z2, w, h0, h1, -3, 'ramp');
+  for (const [x1, z1, x2, z2, w, h] of MAP.bridges || []) addSeg(x1, z1, x2, z2, w, h, h, h - 0.7, 'bridge');
+  (MAP.rails || []).forEach((edges, fi) => { const P = floors[fi]; for (const i of edges) { const [x1, z1] = P[i], [x2, z2] = P[(i + 1) % P.length]; rails.push({ x1, z1, x2, z2, y0: 0, h: 1.5 }); } });
   // himmel og lys
   const c = document.createElement('canvas'); c.width = 4; c.height = 256; const g = c.getContext('2d');
   const gr = g.createLinearGradient(0, 0, 0, 256); gr.addColorStop(0, MAP.sky[0]); gr.addColorStop(0.6, MAP.sky[1]); gr.addColorStop(1, MAP.sky[2]);
   g.fillStyle = gr; g.fillRect(0, 0, 4, 256); scene.background = new THREE.CanvasTexture(c);
-  scene.fog = new THREE.Fog(MAP.fog, 95, 200);
-  // gulv
+  scene.fog = new THREE.Fog(MAP.fog, 95, 210);
+  Object.assign(sun.shadow.camera, { left: -R - 6, right: R + 6, top: R + 6, bottom: -R - 6 }); sun.shadow.camera.updateProjectionMatrix();
+  // gulvflader med klippekanter og huller
   const ft = canvasTex(256, (g) => { g.fillStyle = MAP.floor[0]; g.fillRect(0, 0, 256, 256); g.fillStyle = MAP.floor[1]; g.fillRect(0, 0, 128, 128); g.fillRect(128, 128, 128, 128); g.strokeStyle = MAP.floor[2]; g.lineWidth = 2; g.strokeRect(1, 1, 254, 254); });
-  ft.wrapS = ft.wrapT = THREE.RepeatWrapping; ft.repeat.set(R / 4, R / 4);
-  const floor = madd(mesh(new THREE.CircleGeometry(R + 1.2, 72), new THREE.MeshStandardMaterial({ map: ft, roughness: MAP.grip > 0.01 ? 0.3 : 0.95, metalness: MAP.grip > 0.01 ? 0.15 : 0 }), false, true));
-  floor.rotation.x = -Math.PI / 2;
-  const out = madd(mesh(new THREE.CircleGeometry(230, 48), new THREE.MeshStandardMaterial({ color: MAP.ground, roughness: 1 }), false, true));
-  out.rotation.x = -Math.PI / 2; out.position.y = -0.05;
-  for (const [r1, r2, col, op] of [...MAP.marks, [R - 3.4, R - 3.1, 0xffffff, 0.25]]) { const m = madd(new THREE.Mesh(new THREE.RingGeometry(r1, r2, 72), basic(col, { transparent: true, opacity: op }))); m.rotation.x = -Math.PI / 2; m.position.y = 0.02; }
-  // ydre mur
-  const N = Math.round(R * 0.95), w = 2 * (R + 0.6) * Math.sin(Math.PI / N) + 0.06, wg = new THREE.BoxGeometry(w, 1.8, 1.2);
-  for (let i = 0; i < N; i++) { const a = i / N * TAU, b = madd(mesh(wg, mat(MAP.wall[i % 2]))); b.position.set(Math.sin(a) * (R + 0.6), 0.9, Math.cos(a) * (R + 0.6)); b.rotation.y = a; }
-  // forhindringer
-  pillars.forEach((p, i) => {
-    const col = MAP.pillarCols[i % MAP.pillarCols.length];
-    if (MAP.pillar === 'column') {
-      madd(mesh(new THREE.CylinderGeometry(p.r, p.r * 1.12, p.h, 8), mat(col))).position.set(p.x, p.h / 2, p.z);
-      madd(mesh(new THREE.CylinderGeometry(p.r * 1.06, p.r * 1.06, 0.45, 8), mat(0xffffff))).position.set(p.x, p.h + 0.2, p.z);
-      if (p.big) madd(mesh(new THREE.CylinderGeometry(p.r * 1.08, p.r * 1.08, 0.6, 8), mat(0xff3d6e))).position.set(p.x, 2.2, p.z);
-    } else if (MAP.pillar === 'rock') {
-      const r = madd(mesh(new THREE.DodecahedronGeometry(1, 0), mat(col))); r.scale.set(p.r * 1.1, p.h * 0.6, p.r * 1.1); r.position.set(p.x, p.h * 0.45, p.z); r.rotation.y = i;
-      const t = madd(mesh(new THREE.DodecahedronGeometry(1, 0), mat(0xe8a465))); t.scale.set(p.r * 0.6, p.h * 0.3, p.r * 0.6); t.position.set(p.x + 0.4, p.h * 0.95, p.z - 0.3);
-    } else madd(treeMesh(p.x, p.z, p.r, p.h, col));
-  });
-  for (const [cx, cz, ang, len] of L.lows) {
-    const dx = Math.cos(ang) * len / 2, dz = -Math.sin(ang) * len / 2;
-    lows.push({ x1: cx - dx, z1: cz - dz, x2: cx + dx, z2: cz + dz });
-    const t = lowTex[MAP.low].clone(); t.needsUpdate = true; t.repeat.set(len / 2, 1);
-    const m = madd(mesh(new THREE.BoxGeometry(len, 1, 0.8), new THREE.MeshStandardMaterial({ map: t, roughness: 0.7 }))); m.position.set(cx, 0.5, cz); m.rotation.y = ang;
+  ft.wrapS = ft.wrapT = THREE.RepeatWrapping; ft.repeat.set(1 / 8, 1 / 8);
+  const icy = MAP.grip > 0.01, floorM = new THREE.MeshStandardMaterial({ map: ft, roughness: icy ? 0.3 : 0.95, metalness: icy ? 0.15 : 0 }), cliffM = mat(MAP.cliff);
+  for (const P of floors) {
+    const sh = new THREE.Shape(P.map(([x, z]) => new THREE.Vector2(x, -z)));
+    for (const h of holes) {
+      if (!inPoly(h.r ? h.x : h.p[0][0], h.r ? h.z : h.p[0][1], P)) continue;
+      const path = new THREE.Path(); if (h.r) path.absarc(h.x, -h.z, h.r, 0, TAU, true); else h.p.forEach(([x, z], i) => i ? path.lineTo(x, -z) : path.moveTo(x, -z));
+      sh.holes.push(path);
+    }
+    const m = madd(mesh(new THREE.ExtrudeGeometry(sh, { depth: 5, bevelEnabled: false, curveSegments: 24 }), [floorM, cliffM], false, true));
+    m.rotation.x = -Math.PI / 2; m.position.y = -5;
   }
-  for (const [x, z, a] of L.pads) { const m = madd(new THREE.Mesh(new THREE.PlaneGeometry(4.2, 5.2), new THREE.MeshBasicMaterial({ map: padTex }))); m.rotation.x = -Math.PI / 2; m.rotation.z = a + Math.PI / 2; m.position.set(x, 0.03, z); pads.push({ x, z, m }); }
-  for (const [x, z] of L.boxes) { const m = madd(mesh(bx(1.6, 1.6, 1.6), boxMat)); m.position.set(x, 1.3, z); boxes.push({ x, z, m, active: true, t: 0 }); }
-  // pynt udenfor
+  // afgrunden
+  const ab = madd(new THREE.Mesh(new THREE.CircleGeometry(420, 40), new THREE.MeshStandardMaterial({ color: MAP.abyss, emissive: MAP.abyssGlow || 0, roughness: 1 })));
+  ab.rotation.x = -Math.PI / 2; ab.position.y = -34;
+  // platforme, broer og ramper
+  const platTex = canvasTex(64, (g) => { g.fillStyle = hex(MAP.plat[0]); g.fillRect(0, 0, 64, 64); g.strokeStyle = 'rgba(255,255,255,.35)'; g.lineWidth = 3; g.strokeRect(1.5, 1.5, 61, 61); });
+  platTex.wrapS = platTex.wrapT = THREE.RepeatWrapping;
+  const rampTex = canvasTex(64, (g) => { g.fillStyle = MAP.ramp[0]; g.fillRect(0, 0, 64, 64); g.fillStyle = MAP.ramp[1]; g.fillRect(0, 32, 64, 32); });
+  rampTex.wrapS = rampTex.wrapT = THREE.RepeatWrapping;
+  const sideM = mat(MAP.plat[1], MAP.glow ? { emissive: 0x46d9ff, emissiveIntensity: 0.12 } : undefined);
+  for (const s of solids) {
+    const geo = new THREE.BoxGeometry(s.hw * 2, 1, s.hd * 2), pos = geo.attributes.position;
+    for (let i = 0; i < pos.count; i++) pos.setY(i, pos.getY(i) > 0 ? sTop(s, pos.getZ(i)) : s.b);
+    geo.computeVertexNormals();
+    const t = (s.kind === 'ramp' ? rampTex : platTex).clone(); t.needsUpdate = true;
+    if (s.kind === 'ramp') t.repeat.set(1, s.hd * 2 / 2.5); else t.repeat.set(Math.max(1, Math.round(s.hw / 2)), Math.max(1, Math.round(s.hd / 2)));
+    const top = new THREE.MeshStandardMaterial({ map: t, roughness: icy ? 0.35 : 0.8, metalness: icy ? 0.1 : 0 });
+    const m = madd(mesh(geo, [sideM, sideM, top, sideM, sideM, sideM])); m.position.set(s.x, 0, s.z); m.rotation.y = s.a;
+  }
+  // rækværk langs nogle af kanterne
+  const railM = [mat(MAP.wall[0]), mat(MAP.wall[1], MAP.glow ? { emissive: MAP.wall[1], emissiveIntensity: 0.6 } : undefined)];
+  for (const r of rails) {
+    const dx = r.x2 - r.x1, dz = r.z2 - r.z1, len = Math.hypot(dx, dz), n = Math.max(1, Math.round(len / 3)), ang = Math.atan2(-dz, dx), pg = bx(len / n + 0.04, r.h, 0.8);
+    for (let i = 0; i < n; i++) { const t = (i + 0.5) / n, m = madd(mesh(pg, railM[i % 2])); m.position.set(r.x1 + dx * t, r.y0 + r.h / 2, r.z1 + dz * t); m.rotation.y = ang; }
+  }
+  // forhindringer
+  const glow = (col) => MAP.glow ? { emissive: col, emissiveIntensity: 0.45 } : undefined;
+  (MAP.pillars || []).forEach(([x, z, r, h], i) => {
+    const p = { x, z, r, h, y0: topAt(x, z) }; pillars.push(p);
+    const col = MAP.pillarCols[i % MAP.pillarCols.length], pg = madd(new THREE.Group()); pg.position.y = p.y0;
+    const add = (o) => { pg.add(o); return o; };
+    if (MAP.pillar === 'column') {
+      add(mesh(new THREE.CylinderGeometry(r, r * 1.12, h, 8), mat(col, glow(col)))).position.set(x, h / 2, z);
+      add(mesh(new THREE.CylinderGeometry(r * 1.06, r * 1.06, 0.45, 8), mat(0xffffff))).position.set(x, h + 0.2, z);
+    } else if (MAP.pillar === 'rock') {
+      const a = add(mesh(new THREE.DodecahedronGeometry(1, 0), mat(col))); a.scale.set(r * 1.1, h * 0.6, r * 1.1); a.position.set(x, h * 0.45, z); a.rotation.y = i;
+      const t = add(mesh(new THREE.DodecahedronGeometry(1, 0), mat(0xe8a465))); t.scale.set(r * 0.6, h * 0.3, r * 0.6); t.position.set(x + 0.4, h * 0.95, z - 0.3);
+    } else add(treeMesh(x, z, r, h, col));
+  });
+  for (const [cx, cz, ang, len] of MAP.lows || []) {
+    const dx = Math.cos(ang) * len / 2, dz = -Math.sin(ang) * len / 2, y0 = topAt(cx, cz);
+    lows.push({ x1: cx - dx, z1: cz - dz, x2: cx + dx, z2: cz + dz, y0 });
+    const t = lowTex[MAP.low].clone(); t.needsUpdate = true; t.repeat.set(len / 2, 1);
+    const m = madd(mesh(new THREE.BoxGeometry(len, 1, 0.8), new THREE.MeshStandardMaterial({ map: t, roughness: 0.7 }))); m.position.set(cx, y0 + 0.5, cz); m.rotation.y = ang;
+  }
+  for (const [x, z, hd] of MAP.pads || []) {
+    const y = topAt(x, z), m = madd(new THREE.Mesh(new THREE.PlaneGeometry(4.2, 5.2), new THREE.MeshBasicMaterial({ map: padTex })));
+    m.rotation.x = -Math.PI / 2; m.rotation.z = hd + Math.PI; m.position.set(x, y + 0.03, z); pads.push({ x, z, y, m });
+  }
+  for (const [x, z] of MAP.boxes || []) { const y = topAt(x, z), m = madd(mesh(bx(1.6, 1.6, 1.6), boxMat)); m.position.set(x, y + 1.3, z); boxes.push({ x, z, y, m, active: true, t: 0 }); }
+  for (const [x, z, a] of MAP.spawns) {
+    const P = floors.find(P => inPoly(x, z, P)) || floors[0], [cx, cz] = centroid(P);
+    spawns.push({ x, z, y: topAt(x, z), a: a !== undefined ? a : Math.atan2(cx - x, cz - z) });
+  }
+  // pynt: svævende øer og skyer omkring banen
   for (let i = 0; i < 12; i++) {
-    const a = i / 12 * TAU + rand(-0.2, 0.2), r = rand(R + 35, R + 80), cg = new THREE.Group();
+    const a = i / 12 * TAU + rand(-0.2, 0.2), r = rand(R + 40, R + 85), cg = new THREE.Group();
     for (let j = 0; j < 4; j++) { const p = new THREE.Mesh(cloudGeo, cloudMat); p.scale.setScalar(rand(4, 8)); p.position.set(j * 6 - 9, rand(-1.5, 1.5), rand(-2, 2)); cg.add(p); }
     cg.position.set(Math.sin(a) * r, rand(30, 55), Math.cos(a) * r); cg.lookAt(0, cg.position.y, 0); madd(cg);
   }
-  if (MAP.decor === 'tires') {
-    const tGeo = new THREE.CylinderGeometry(0.9, 0.9, 0.45, 12);
-    for (let i = 0; i < 16; i++) { const a = i / 16 * TAU + 0.1, r = R + 4 + (i % 3); for (let h = 0; h < 3; h++) madd(mesh(tGeo, mat(h % 2 ? 0x22263a : 0x31364d))).position.set(Math.sin(a) * r, 0.23 + h * 0.45, Math.cos(a) * r); }
-    for (const [x, z] of circ(4, R + 10, TAU / 8)) {
-      madd(mesh(new THREE.CylinderGeometry(0.35, 0.5, 22, 6), mat(0x4a5272))).position.set(x, 11, z);
-      const head = madd(mesh(bx(5, 2, 1), mat(0x2a2f45, { emissive: 0xfff2c0, emissiveIntensity: 0.9 }))); head.position.set(x, 22, z); head.lookAt(0, 0, 0);
-    }
-  } else if (MAP.decor === 'cacti') {
-    for (let i = 0; i < 22; i++) {
-      const a = rand(0, TAU), r = rand(R + 5, R + 40), x = Math.sin(a) * r, z = Math.cos(a) * r, h = rand(3, 6), cm = mat(0x3f9a5a);
-      madd(mesh(new THREE.CylinderGeometry(0.5, 0.6, h, 7), cm)).position.set(x, h / 2, z);
-      const arm = madd(mesh(new THREE.CylinderGeometry(0.35, 0.35, h * 0.4, 7), cm)); arm.position.set(x + 0.8, h * 0.6, z);
-      madd(mesh(bx(0.9, 0.3, 0.3), cm)).position.set(x + 0.45, h * 0.42, z);
-    }
-    const sunM = madd(new THREE.Mesh(new THREE.CircleGeometry(14, 32), basic(0xfff1b8, { fog: false }))); sunM.position.set(-60, 70, -170); sunM.lookAt(0, 20, 0);
-  } else {
-    for (let i = 0; i < 40; i++) { const a = rand(0, TAU), r = rand(R + 6, R + 45); madd(treeMesh(Math.sin(a) * r, Math.cos(a) * r, rand(1.6, 2.6), rand(7, 12), 0x2f9e6b)); }
+  for (let i = 0; i < 14; i++) {
+    const a = i / 14 * TAU + rand(-0.15, 0.15), r = rand(R + 20, R + 70), s = rand(3, 7), ig = madd(new THREE.Group());
+    ig.position.set(Math.sin(a) * r, rand(-16, 3), Math.cos(a) * r);
+    const rock = mesh(new THREE.ConeGeometry(s, s * 1.8, 7), mat(MAP.cliff)); rock.rotation.x = Math.PI; rock.position.y = -s * 0.9 - 0.25; ig.add(rock);
+    ig.add(mesh(new THREE.CylinderGeometry(s, s, 0.5, 7), mat(MAP.ground)));
+    const px = rand(-s, s) * 0.4, pz = rand(-s, s) * 0.4, put = (o, y, dx = 0) => { o.position.set(px + dx, y, pz); ig.add(o); };
+    if (MAP.decor === 'tires') { const tGeo = new THREE.CylinderGeometry(0.9, 0.9, 0.45, 12); for (let h = 0; h < 3; h++) put(mesh(tGeo, mat(h % 2 ? 0x22263a : 0x31364d)), 0.48 + h * 0.45); }
+    else if (MAP.decor === 'cacti') { const h = rand(3, 6), cm = mat(0x3f9a5a); put(mesh(new THREE.CylinderGeometry(0.5, 0.6, h, 7), cm), h / 2); put(mesh(new THREE.CylinderGeometry(0.35, 0.35, h * 0.4, 7), cm), h * 0.6, 0.8); put(mesh(bx(0.9, 0.3, 0.3), cm), h * 0.42, 0.45); }
+    else if (MAP.decor === 'trees') ig.add(treeMesh(px, pz, rand(1.4, 2.2), rand(6, 10), 0x2f9e6b));
+    else { const col = MAP.pillarCols[i % MAP.pillarCols.length], h = rand(4, 9); put(mesh(new THREE.CylinderGeometry(0.35, 0.35, h, 6), mat(col, { emissive: col, emissiveIntensity: 0.9 })), h / 2); }
   }
+  if (MAP.decor === 'cacti') { const sunM = madd(new THREE.Mesh(new THREE.CircleGeometry(14, 32), basic(0xfff1b8, { fog: false }))); sunM.position.set(-60, 70, -170); sunM.lookAt(0, 20, 0); }
 }
-let mapKey = 'arena', gameMode = 'kills';
+let mapKey = 'bygge', gameMode = 'kills';
 buildMap(mapKey);
 
 // ---------- Karts ----------
@@ -582,6 +687,7 @@ const helmetGeo = new THREE.SphereGeometry(0.3, 10, 8), ringGeo = new THREE.Toru
 const shieldGeo = new THREE.SphereGeometry(2, 16, 12);
 function makeKart(color) {
   const g = new THREE.Group(), body = new THREE.MeshStandardMaterial({ color, flatShading: true, roughness: 0.55 });
+  g.rotation.order = 'YXZ'; // hældning (x) om kartets egen akse efter drejningen
   const suit = mat(new THREE.Color(color).multiplyScalar(0.5).getHex());
   const add = (geo, m, x, y, z, rx = 0) => { const o = mesh(geo, m); o.position.set(x, y, z); o.rotation.x = rx; g.add(o); return o; };
   add(bx(1.3, 0.18, 2.4), shared.dark, 0, 0.32, 0);
@@ -624,7 +730,7 @@ let karts = [], player = null, kidSeq = 0;
 function createKart(name, color, isPlayer) {
   const m = makeKart(color); scene.add(m.g);
   const k = { name, color, isPlayer, m, x: 0, z: 0, y: 0, vy: 0, vx: 0, vz: 0, a: 0, speed: 0, hp: 100, alive: true, respawnT: 0,
-    weapon: null, ammo: 0, fireCd: 0, dashCd: 0, jumpCd: 0, dashT: 0, boostT: 0, shieldT: 0, invulnT: 0, flashT: 0, ramCd: 0,
+    weapon: null, weapon2: null, ammo: 0, fireCd: 0, dashCd: 0, jumpCd: 0, dashT: 0, boostT: 0, shieldT: 0, invulnT: 0, flashT: 0, ramCd: 0,
     kills: 0, deaths: 0, dmg: 0, crownPts: 0, steerVis: 0, spawnIdx: -1, ...RESET,
     ai: isPlayer ? null : { retarget: 0, target: null, box: null, reverseT: 0, revSteer: 1, stuckT: 0, fireDelay: 0.3, holdT: 0, reactT: 0, wander: { x: 0, z: 0 }, skill: rand(0.6, 0.85), aimErr: 0 } };
   if (!isPlayer) {
@@ -646,7 +752,7 @@ function spawn(k, idx) {
       md += Math.random() * 8; if (md > bestD) { bestD = md; best = s; }
     }
   }
-  Object.assign(k, { x: best.x, z: best.z, a: best.a, y: 0, vy: 0, vx: 0, vz: 0, speed: 0, hp: 100, alive: true, weapon: null, ammo: 0,
+  Object.assign(k, { x: best.x, z: best.z, a: best.a, y: best.y, gh: best.y, slopeVy: 0, lastHit: null, vy: 0, vx: 0, vz: 0, speed: 0, hp: 100, alive: true, weapon: null, weapon2: null, ammo: 0,
     invulnT: 2, shieldT: 0, dashCd: 0, jumpCd: 0, dashT: 0, boostT: 0 }, RESET);
   k.m.g.visible = true;
   if (k.ai) { k.ai.target = null; k.ai.box = null; k.ai.retarget = 0; }
@@ -671,7 +777,7 @@ const rings = [];
 for (let i = 0; i < 6; i++) { const m = new THREE.Mesh(new THREE.RingGeometry(0.85, 1, 48), basic(0x46d9ff, { transparent: true, side: THREE.DoubleSide, depthWrite: false })); m.rotation.x = -Math.PI / 2; m.visible = false; scene.add(m); rings.push({ m, life: 0 }); }
 let shake = 0;
 function flash(x, y, z, size) { const f = flashes.find(f => f.life <= 0) || flashes[0]; f.life = f.max = 0.35; f.size = size; f.m.position.set(x, y, z); f.m.visible = true; }
-function ring(x, z, size, color) { const r = rings.find(r => r.life <= 0) || rings[0]; r.life = r.max = 0.45; r.size = size; r.m.material.color.setHex(color); r.m.position.set(x, 0.3, z); r.m.visible = true; }
+function ring(x, z, size, color, y) { const r = rings.find(r => r.life <= 0) || rings[0]; r.life = r.max = 0.45; r.size = size; r.m.material.color.setHex(color); r.m.position.set(x, (y === undefined ? topAt(x, z) : y) + 0.3, z); r.m.visible = true; }
 function explode(x, y, z, size = 1) {
   flash(x, y, z, 2.6 * size);
   emit(x, y, z, [0xffd23f, 0xff8c1a, 0xff3d6e, 0xffffff], Math.round(26 * size), 14 * size, 0.45, 0.7);
@@ -684,7 +790,7 @@ function updateFx(dt) {
     if (p.life <= 0) continue;
     p.life -= dt; if (p.life <= 0) { p.m.visible = false; continue; }
     p.vy += p.g * dt; p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
-    if (p.y < 0.05) { p.y = 0.05; p.vy *= -0.3; p.vx *= 0.7; p.vz *= 0.7; }
+    if (p.vy < 0) { const g = groundAt(p.x, p.z, p.y + 0.6 - STEP); if (g > VOID && p.y < g + 0.05) { p.y = g + 0.05; p.vy *= -0.3; p.vx *= 0.7; p.vz *= 0.7; } }
     const t = p.life / p.max; p.m.position.set(p.x, p.y, p.z); p.m.scale.setScalar(p.s * (0.3 + 0.7 * t)); p.m.material.opacity = Math.min(1, t * 1.6);
     p.m.rotation.x += dt * 5; p.m.rotation.y += dt * 4;
   }
@@ -773,18 +879,34 @@ function pushOut(k, cx, cz, rad) {
   const vn = k.vx * ox + k.vz * oz; if (vn < 0) { k.vx -= vn * ox * 1.5; k.vz -= vn * oz * 1.5; }
   return true;
 }
+const within = (y, y0, h) => y < y0 + h && y > y0 - KH;
 function collideWorld(k) {
-  const d = Math.hypot(k.x, k.z);
-  if (d > R - KR) { const nx = k.x / d, nz = k.z / d; k.x = nx * (R - KR); k.z = nz * (R - KR); const vn = k.vx * nx + k.vz * nz; if (vn > 0) { k.vx -= vn * nx * 1.5; k.vz -= vn * nz * 1.5; } }
-  for (const p of pillars) if (k.y < p.h) pushOut(k, p.x, p.z, p.r + KR);
-  if (k.y < 1.05) for (const s of lows) { const [cx, cz] = segClosest(k.x, k.z, s); pushOut(k, cx, cz, 0.4 + KR); }
+  for (const s of rails) if (within(k.y, s.y0, s.h)) { const [cx, cz] = segClosest(k.x, k.z, s); pushOut(k, cx, cz, 0.45 + KR); }
+  for (const p of pillars) if (within(k.y, p.y0, p.h)) pushOut(k, p.x, p.z, p.r + KR);
+  for (const s of lows) if (within(k.y, s.y0, 1.05)) { const [cx, cz] = segClosest(k.x, k.z, s); pushOut(k, cx, cz, 0.4 + KR); }
+  // platforme og ramper: kan ikke køres ind i fra siden, hvis toppen er mere end et trin over kartet
+  for (const s of solids) {
+    const [u, v] = sLocal(s, k.x, k.z), eu = s.hw + KR * 0.8, ev = s.hd + KR * 0.8;
+    if (u >= eu || u <= -eu || v >= ev || v <= -ev) continue;
+    if (sTop(s, v) <= k.y + STEP || s.b >= k.y + KH) continue;
+    const pu = eu - Math.abs(u), pv = ev - Math.abs(v);
+    let nx, nz, pen;
+    if (pu < pv) { const sg = u < 0 ? -1 : 1; nx = s.ca * sg; nz = -s.sa * sg; pen = pu; }
+    else { const sg = v < 0 ? -1 : 1; nx = s.sa * sg; nz = s.ca * sg; pen = pv; }
+    k.x += nx * pen; k.z += nz * pen;
+    const vn = k.vx * nx + k.vz * nz; if (vn < 0) { k.vx -= vn * nx * 1.5; k.vz -= vn * nz * 1.5; }
+  }
 }
 function solid(x, y, z) {
-  if (Math.hypot(x, z) > R - 0.2) return true;
-  for (const p of pillars) if (y < p.h && Math.hypot(x - p.x, z - p.z) < p.r) return true;
-  if (y < 1.0) for (const s of lows) { const [cx, cz] = segClosest(x, z, s); if (Math.hypot(x - cx, z - cz) < 0.45) return true; }
+  if (y < -0.2 && y > -5 && onFloor(x, z)) return true;
+  for (const s of solids) { const [u, v] = sLocal(s, x, z); if (Math.abs(u) < s.hw && Math.abs(v) < s.hd && y < sTop(s, v) - 0.05 && y > s.b) return true; }
+  for (const s of rails) if (y < s.y0 + s.h && y > s.y0 - 0.3) { const [cx, cz] = segClosest(x, z, s); if (Math.hypot(x - cx, z - cz) < 0.45) return true; }
+  for (const p of pillars) if (y < p.y0 + p.h && y > p.y0 - 0.3 && Math.hypot(x - p.x, z - p.z) < p.r) return true;
+  for (const s of lows) if (y < s.y0 + 1 && y > s.y0 - 0.3) { const [cx, cz] = segClosest(x, z, s); if (Math.hypot(x - cx, z - cz) < 0.45) return true; }
   return false;
 }
+// fald ud over kanten: den der sidst ramte en, får killet
+function fallKill(k) { kill(k, k.lastHit && time - k.lastHitT < 6 && k.lastHit !== k ? k.lastHit : null, 'Afgrund'); }
 
 // ---------- Skade ----------
 let state = 'menu', matchT = MATCH_TIME, countdown = 0, lastCount = 0, time = 0;
@@ -798,23 +920,28 @@ function damage(t, amt, src, wname, kx = 0, kz = 0) {
   }
   if (!t.alive || t.invulnT > 0 || state === 'end') return;
   if (t.shieldT > 0) { sfx.clink(t.x, t.z); emit(t.x, t.y + 1, t.z, 0x46d9ff, 6, 6, 0.25, 0.3); return; }
-  if (src && src !== t) src.dmg += Math.min(amt, Math.max(0, t.hp));
+  if (src && src !== t) { src.dmg += Math.min(amt, Math.max(0, t.hp)); t.lastHit = src; t.lastHitT = time; }
   t.hp -= amt; t.flashT = 0.12; t.vx += kx; t.vz += kz;
+  const kn = Math.hypot(kx, kz); // hårde stød løfter kartet og gør det glat et øjeblik, så det flyver væk (evt. ud over kanten)
+  if (kn > 6) { t.knockT = Math.min(0.6, kn / 50); if (air(t) < 0.3) t.vy = Math.max(t.vy, Math.min(7, kn * 0.22)); t.driftDir = 0; t.driftT = 0; }
   if (src && src.isPlayer && src !== t) { const h = $('hit'); h.classList.remove('on'); void h.offsetWidth; h.classList.add('on'); sfx.hitm(); }
   if (t.isPlayer) { shake = Math.min(1.2, shake + 0.35); const v = $('vign'); v.classList.add('on'); setTimeout(() => v.classList.remove('on'), 60); sfx.hurt(); }
   if (t.hp <= 0) kill(t, src, wname);
 }
 function kill(t, src, wname) {
-  t.alive = false; t.hp = 0; t.respawnT = RESPAWN; t.deaths++; t.weapon = null; t.m.g.visible = false; t.shieldT = 0; Object.assign(t, RESET);
-  explode(t.x, t.y + 0.8, t.z, 1.4);
-  emit(t.x, t.y + 0.8, t.z, [t.color, 0x22263a, t.color], 16, 11, 0.55, 1.4, -20, 0.8);
+  t.alive = false; t.hp = 0; t.respawnT = RESPAWN; t.deaths++; t.weapon = null; t.weapon2 = null; t.m.g.visible = false; t.shieldT = 0; Object.assign(t, RESET);
+  const fell = wname === 'Afgrund';
+  if (!fell) { explode(t.x, t.y + 0.8, t.z, 1.4); emit(t.x, t.y + 0.8, t.z, [t.color, 0x22263a, t.color], 16, 11, 0.55, 1.4, -20, 0.8); }
   const self = !src || src === t;
   if (!self) src.kills++;
   if (online) pushEv(['d', t.id, self ? '' : src.id, wname, r1(t.x), r1(t.z)]);
   if (gameMode === 'crown' && crown.holder === t && (!online || online.host)) { if (!self && src.alive) giveCrown(src); else dropCrown(t.x, t.z); }
   if (state === 'menu') return;
   feed(self ? null : src, t, wname);
-  if (t.isPlayer) setMsg('Smadret', self ? `Du ramte din egen ${wname.toLowerCase()}` : `${src.name} fik dig med ${wname.toLowerCase()}`, RESPAWN, true);
+  if (t.isPlayer) {
+    if (fell) setMsg('Faldt ned', self ? 'Du kørte ud over kanten' : `${src.name} skubbede dig ud over kanten`, RESPAWN, true);
+    else setMsg('Smadret', self ? `Du ramte din egen ${wname.toLowerCase()}` : `${src.name} fik dig med ${wname.toLowerCase()}`, RESPAWN, true);
+  }
   if (src && src.isPlayer && !self) { const p = $('plus'); p.classList.remove('on'); void p.offsetWidth; p.classList.add('on'); }
 }
 
@@ -832,10 +959,7 @@ const crownMesh = new THREE.Group();
 }
 const crownBeam = new THREE.Mesh(new THREE.CylinderGeometry(0.9, 0.9, 30, 12, 1, true), basic(0xffd23f, { transparent: true, opacity: 0.18, depthWrite: false, side: THREE.DoubleSide }));
 crownBeam.visible = false; scene.add(crownBeam);
-function crownSpawn() {
-  for (const p of pillars) if (Math.hypot(p.x, p.z) < p.r + 1.5) return [0, p.r + 3];
-  return [0, 0];
-}
+function crownSpawn() { return MAP.crown ? MAP.crown.slice() : [0, 0]; }
 function resetCrown() { crown.holder = null; crown.free = true; crown.lockT = 0; [crown.x, crown.z] = crownSpawn(); }
 function giveCrown(k) {
   crown.holder = k; crown.free = false;
@@ -846,7 +970,7 @@ function giveCrown(k) {
 }
 function dropCrown(x, z) {
   crown.holder = null; crown.free = true; crown.lockT = 1;
-  const d = Math.hypot(x, z); if (d > R - 3) { x *= (R - 3) / d; z *= (R - 3) / d; }
+  if (groundAt(x, z, 1e3) === VOID) [x, z] = crownSpawn(); // tabt ud over kanten: tilbage til start
   for (const p of pillars) { const dd = Math.hypot(x - p.x, z - p.z); if (dd < p.r + 1.5) { const n = dd || 1; x = p.x + (x - p.x) / n * (p.r + 2); z = p.z + (z - p.z) / n * (p.r + 2); } }
   crown.x = x; crown.z = z;
 }
@@ -862,8 +986,9 @@ function updateCrown(dt) {
     if (Math.random() < 0.25) emit(k.x, k.y + 2.3, k.z, 0xffd23f, 1, 1, 0.12, 0.4, 2, 0.5);
   } else {
     crown.lockT -= dt;
-    crownMesh.position.set(crown.x, 1.6 + Math.sin(time * 3) * 0.25, crown.z); crownBeam.position.set(crown.x, 15, crown.z);
-    if (crown.lockT <= 0 && (state === 'play' || state === 'menu') && (!online || online.host)) for (const k of karts) if (k.alive && k.y < 3 && Math.hypot(k.x - crown.x, k.z - crown.z) < 2.4) { giveCrown(k); break; }
+    const cy = topAt(crown.x, crown.z);
+    crownMesh.position.set(crown.x, cy + 1.6 + Math.sin(time * 3) * 0.25, crown.z); crownBeam.position.set(crown.x, cy + 15, crown.z);
+    if (crown.lockT <= 0 && (state === 'play' || state === 'menu') && (!online || online.host)) for (const k of karts) if (k.alive && Math.abs(k.y - cy) < 3 && Math.hypot(k.x - crown.x, k.z - crown.z) < 2.4) { giveCrown(k); break; }
   }
 }
 function crownFeed(k) {
@@ -878,20 +1003,22 @@ const projs = [], mines = [], slicks = [];
 const oilGeo = new THREE.CircleGeometry(2.3, 9), oilMat = new THREE.MeshStandardMaterial({ color: 0x2a1f45, roughness: 0.1, metalness: 0.6, emissive: 0x2a0f3a });
 function boomMesh() { const g = new THREE.Group(), m = basic(0xffd23f); const a = new THREE.Mesh(bx(1.3, 0.12, 0.35), m), b = a.clone(); a.position.x = 0.5; b.rotation.y = Math.PI / 2; b.position.z = 0.5; g.add(a, b); return g; }
 const iceGeo = new THREE.OctahedronGeometry(0.5, 0), iceMat = basic(0xbff3ff);
+const ropeMat = new THREE.LineBasicMaterial({ color: 0x3a2a1a });
+function hookMesh() { const g = new THREE.Group(), m = mat(0xb8c0cc, { metalness: 0.6, roughness: 0.3 }); const a = new THREE.Mesh(bx(0.18, 0.18, 0.9), m), b = new THREE.Mesh(bx(0.9, 0.14, 0.14), m), c = b.clone(); b.position.z = 0.4; b.rotation.y = 0.6; c.position.z = 0.4; c.rotation.y = -0.6; g.add(a, b, c); return g; }
 function removeSlick(s) { scene.remove(s.m); slicks.splice(slicks.indexOf(s), 1); }
 const bolts = [];
 for (let i = 0; i < 3; i++) { const m = new THREE.Mesh(new THREE.BoxGeometry(0.5, 50, 0.5), basic(0xfff6a8, { transparent: true })); m.visible = false; scene.add(m); bolts.push({ m, life: 0 }); }
 function bolt(x, z) {
   const b = bolts.find(b => b.life <= 0) || bolts[0]; b.life = 0.3; b.m.position.set(x, 25, z); b.m.visible = true;
-  flash(x, 1, z, 3); emit(x, 0.5, z, [0xfff6a8, 0xffffff, 0x46d9ff], 22, 12, 0.35, 0.5);
+  const by = topAt(x, z); flash(x, by + 1, z, 3); emit(x, by + 0.5, z, [0xfff6a8, 0xffffff, 0x46d9ff], 22, 12, 0.35, 0.5);
   shake = Math.min(1.2, shake + 0.4 * vol(x, z));
 }
 function slam(k) {
   pushEv(['fx', 'slam', r1(k.x), r1(k.z)]);
-  ring(k.x, k.z, 9, 0xffd23f); ring(k.x, k.z, 6, 0xffffff); explode(k.x, 0.5, k.z, 1.3);
+  ring(k.x, k.z, 9, 0xffd23f, k.y); ring(k.x, k.z, 6, 0xffffff, k.y); explode(k.x, k.y + 0.5, k.z, 1.3);
   for (const o of karts) {
     if (o === k || !o.alive) continue; const dx = o.x - k.x, dz = o.z - k.z, d = Math.hypot(dx, dz);
-    if (d < 8 && o.y < 3) { const n = d || 1; if (o.y < 0.1 && o.shieldT <= 0) o.vy = 8; damage(o, Math.round((20 + 25 * (1 - d / 8)) * k.slamMult), k, k.slamMult < 1 ? 'Luftkanon' : 'Superhop', dx / n * 22, dz / n * 22); }
+    if (d < 8 && Math.abs(o.y - k.y) < 3) { const n = d || 1; if (air(o) < 0.1 && o.shieldT <= 0) o.vy = 8; damage(o, Math.round((20 + 25 * (1 - d / 8)) * k.slamMult), k, k.slamMult < 1 ? 'Luftkanon' : 'Superhop', dx / n * 30, dz / n * 30); }
   }
 }
 const rBody = new THREE.CylinderGeometry(0.16, 0.16, 0.9, 8).rotateX(Math.PI / 2);
@@ -906,7 +1033,8 @@ function rocketMesh(c) {
 }
 function giveRandom(k) {
   const w = WKEYS[Math.floor(Math.random() * WKEYS.length)];
-  k.weapon = w; k.ammo = WEAPONS[w].ammo; k.fireCd = 0.25;
+  if (k.weapon) k.weapon2 = w; // har man allerede et våben, kommer det nye i reserven
+  else { k.weapon = w; k.ammo = WEAPONS[w].ammo; k.fireCd = 0.25; }
   if (k.ai) { k.ai.holdT = 0; k.ai.retarget = 0; }
   if (k.isPlayer) { sfx.pickup(); const el = $('weapon'); el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash'); }
 }
@@ -923,21 +1051,24 @@ function nearestEnemy(k, cone) {
 }
 function spawnProj(type, k, side = 0, angle, power = 0) {
   const fx = Math.sin(k.a), fz = Math.cos(k.a), fwd = Math.max(0, k.vx * fx + k.vz * fz);
-  const base = type === 'rocket' ? 46 : type === 'homing' ? 34 : type === 'ice' ? 40 + power * 18 : type === 'boomerang' ? 38 : 78;
+  const base = type === 'rocket' ? 46 : type === 'homing' ? 34 : type === 'ice' ? 40 + power * 18 : type === 'boomerang' ? 38 : type === 'hook' ? 70 : 78;
   const a = (angle === undefined ? k.a : angle) + (type === 'bullet' ? rand(-0.02, 0.02) : 0);
   const p = { type, owner: k, x: k.x + fx * 1.9 + fz * side, y: k.y + 0.75, z: k.z + fz * 1.9 - fx * side, a, sp: base + fwd * 0.7,
-    life: type === 'bullet' ? 0.6 : type === 'homing' || type === 'boomerang' ? 4 : 2.4, age: 0, hitSet: new Set(), power, hitR: type === 'ice' ? power * 0.7 : 0, vy: type === 'bullet' && k.y > 1 ? -(k.y - 0.1) / 0.4 : 0, yl: k.y > 1.5 ? 6 : 2.5, target: type === 'homing' ? nearestEnemy(k, true) : null };
-  p.m = type === 'bullet' ? new THREE.Mesh(bulletGeo, bulletMat) : type === 'ice' ? new THREE.Mesh(iceGeo, iceMat) : type === 'boomerang' ? boomMesh() : rocketMesh(type === 'homing' ? 0x46d9ff : 0xff3d6e);
+    life: type === 'bullet' ? 0.6 : type === 'hook' ? 0.45 : type === 'homing' || type === 'boomerang' ? 4 : 2.4, age: 0, hitSet: new Set(), power, hitR: type === 'ice' ? power * 0.7 : type === 'hook' ? 0.4 : 0, vy: type === 'bullet' && air(k) > 1 && k.gh > VOID ? -(air(k) - 0.1) / 0.4 : 0, yl: air(k) > 1.5 ? 6 : 2.5, gy: k.gh > VOID ? k.gh : k.y, target: type === 'homing' ? nearestEnemy(k, true) : null };
+  p.m = type === 'bullet' ? new THREE.Mesh(bulletGeo, bulletMat) : type === 'ice' ? new THREE.Mesh(iceGeo, iceMat) : type === 'boomerang' ? boomMesh() : type === 'hook' ? hookMesh() : rocketMesh(type === 'homing' ? 0x46d9ff : 0xff3d6e);
+  if (type === 'hook') { p.rope = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]), ropeMat); p.rope.frustumCulled = false; scene.add(p.rope); }
   p.m.position.set(p.x, p.y, p.z); p.m.rotation.y = a; scene.add(p.m); projs.push(p);
   if (type === 'ice') p.m.scale.setScalar(1 + power * 1.3);
   if (online && !k.remote && type !== 'bullet') pushEv(['p', k.id, type, r1(p.x), r1(p.y), r1(p.z), Math.round(a * 1000) / 1000, r1(power)]);
-  if (type === 'bullet') sfx.bullet(k.x, k.z); else sfx.rocket(k.x, k.z);
+  if (type === 'bullet') sfx.bullet(k.x, k.z); else if (type === 'hook') sfx.dash(k.x, k.z); else sfx.rocket(k.x, k.z);
   return p;
 }
 function validSpot(x, z, y) {
-  if (Math.hypot(x, z) > R - KR - 0.5) return false;
-  for (const p of pillars) if (y < p.h && Math.hypot(x - p.x, z - p.z) < p.r + KR) return false;
-  if (y < 1.05) for (const s of lows) { const [cx, cz] = segClosest(x, z, s); if (Math.hypot(x - cx, z - cz) < KR + 0.5) return false; }
+  if (groundAt(x, z, y) === VOID) return false;
+  for (const p of pillars) if (within(y, p.y0, p.h) && Math.hypot(x - p.x, z - p.z) < p.r + KR) return false;
+  for (const s of lows) if (within(y, s.y0, 1.05)) { const [cx, cz] = segClosest(x, z, s); if (Math.hypot(x - cx, z - cz) < KR + 0.5) return false; }
+  for (const s of rails) if (within(y, s.y0, s.h)) { const [cx, cz] = segClosest(x, z, s); if (Math.hypot(x - cx, z - cz) < KR + 0.5) return false; }
+  for (const s of solids) { const [u, v] = sLocal(s, x, z); if (Math.abs(u) < s.hw + KR * 0.8 && Math.abs(v) < s.hd + KR * 0.8 && sTop(s, v) > y + STEP && s.b < y + KH) return false; }
   return true;
 }
 const STAGED = { superhop: 1, rocket: 1, mg: 1, boomerang: 1 };
@@ -949,17 +1080,17 @@ function useWeapon(k, inp) {
   if (STAGED[w]) {
     if (!inp.fireP) return;
     if (!k.wStage) { // første tryk
-      if (w === 'superhop') { k.vy = 17; k.superT = 3; emit(k.x, 0.3, k.z, [0xffd23f, 0xffffff], 18, 9, 0.4, 0.5, -6, 0.2); ring(k.x, k.z, 5, 0xffd23f); sfx.superjump(k.x, k.z); }
-      else if (w === 'rocket') { k.vy = 14; k.superT = 3; k.vx += fx * 10; k.vz += fz * 10; flash(k.x, 0.4, k.z, 1.6); emit(k.x, 0.3, k.z, [0xffd23f, 0xff8c1a, 0xff3d6e], 20, 9, 0.4, 0.5, -6, 0.3); sfx.rocket(k.x, k.z); }
-      else if (w === 'mg') { k.vy = 10; emit(k.x, 0.3, k.z, [0xffe680, 0xffffff], 14, 7, 0.35, 0.4, -6, 0.2); sfx.superjump(k.x, k.z); }
+      if (w === 'superhop') { k.vy = 17; k.superT = 3; emit(k.x, k.y + 0.3, k.z, [0xffd23f, 0xffffff], 18, 9, 0.4, 0.5, -6, 0.2); ring(k.x, k.z, 5, 0xffd23f, k.y); sfx.superjump(k.x, k.z); }
+      else if (w === 'rocket') { k.vy = 14; k.superT = 3; k.vx += fx * 10; k.vz += fz * 10; flash(k.x, k.y + 0.4, k.z, 1.6); emit(k.x, k.y + 0.3, k.z, [0xffd23f, 0xff8c1a, 0xff3d6e], 20, 9, 0.4, 0.5, -6, 0.3); sfx.rocket(k.x, k.z); }
+      else if (w === 'mg') { k.vy = 10; emit(k.x, k.y + 0.3, k.z, [0xffe680, 0xffffff], 14, 7, 0.35, 0.4, -6, 0.2); sfx.superjump(k.x, k.z); }
       else if (w === 'boomerang') k.boomProj = spawnProj('boomerang', k);
       k.wStage = 1; k.wT = 3; k.fireCd = 0.25; k.driftDir = 0; k.driftT = 0;
       return;
     }
     // andet tryk
-    if (w === 'superhop') { if (k.y <= 1.2 || k.slamming) return; k.slamming = true; k.slamMult = 1; k.vy = -40; k.superT = 0; sfx.dash(k.x, k.z); }
+    if (w === 'superhop') { if (air(k) <= 1.2 || k.slamming) return; k.slamming = true; k.slamMult = 1; k.vy = -40; k.superT = 0; sfx.dash(k.x, k.z); }
     else if (w === 'rocket') { const t = nearestEnemy(k, true); spawnProj('rocket', k, 0, t && Math.hypot(t.x - k.x, t.z - k.z) < 55 ? Math.atan2(t.x - k.x, t.z - k.z) : k.a); }
-    else if (w === 'mg') { if (k.y > 1) { k.slamming = true; k.slamMult = 0.6; k.vy = -40; sfx.dash(k.x, k.z); } }
+    else if (w === 'mg') { if (air(k) > 1) { k.slamming = true; k.slamMult = 0.6; k.vy = -40; sfx.dash(k.x, k.z); } }
     else if (w === 'boomerang') {
       const p = k.boomProj; if (!p) return;
       let x = p.x, z = p.z; emit(k.x, k.y + 0.8, k.z, [0xffd23f, 0xffffff], 16, 6, 0.35, 0.45, 0, 0.5);
@@ -974,29 +1105,27 @@ function useWeapon(k, inp) {
   if (w === 'mg') { if (inp.fire) { k.fireCd = 0.085; spawnProj('bullet', k, 0.55); spawnProj('bullet', k, -0.55); k.ammo--; } }
   else if (inp.fireP) {
     k.fireCd = 0.3;
-    if (w === 'rocket' || w === 'homing') spawnProj(w, k);
+    if (w === 'rocket' || w === 'homing' || w === 'hook') spawnProj(w, k);
     else if (w === 'mine') {
       const fx = Math.sin(k.a), fz = Math.cos(k.a), x = k.x - fx * 2.6, z = k.z - fz * 2.6;
       const g = new THREE.Group(), base = mesh(mineGeo, shared.dark), light = new THREE.Mesh(lightGeo, basic(0xff3d6e));
-      light.position.y = 0.2; g.add(base, light); g.position.set(x, 0.13, z); scene.add(g);
-      mines.push({ x, z, owner: k, arm: 0.7, life: 30, g, light });
+      light.position.y = 0.2; g.add(base, light); const my = topAt(x, z); g.position.set(x, my + 0.13, z); scene.add(g);
+      mines.push({ x, z, y: my, owner: k, arm: 0.7, life: 30, g, light });
       if (mines.length > 14) removeMine(mines[0]);
       sfx.mine(x, z);
     } else if (w === 'shield') { k.shieldT = 6; sfx.shield(k.x, k.z); }
     else if (w === 'ice') spawnProj('ice', k);
     else if (w === 'boomerang') spawnProj('boomerang', k);
     else if (w === 'oil') {
-      const fx = Math.sin(k.a), fz = Math.cos(k.a), x = k.x - fx * 3, z = k.z - fz * 3;
-      const m = new THREE.Mesh(oilGeo, oilMat); m.rotation.x = -Math.PI / 2; m.position.set(x, 0.04, z); m.rotation.z = rand(0, TAU); scene.add(m);
-      slicks.push({ x, z, owner: k, life: 20, m }); if (slicks.length > 10) removeSlick(slicks[0]);
+      const fx = Math.sin(k.a), fz = Math.cos(k.a), x = k.x - fx * 3, z = k.z - fz * 3, g = groundAt(x, z, k.y), y = g > VOID ? g : k.y;
+      const m = new THREE.Mesh(oilGeo, oilMat); m.rotation.x = -Math.PI / 2; m.position.set(x, y + 0.04, z); m.rotation.z = rand(0, TAU); scene.add(m);
+      slicks.push({ x, z, y, owner: k, life: 20, m }); if (slicks.length > 10) removeSlick(slicks[0]);
       sfx.oil(x, z); pushEv(['o', k.id, r1(x), r1(z)]);
     } else if (w === 'blink') {
       const fx = Math.sin(k.a), fz = Math.cos(k.a); emit(k.x, k.y + 0.8, k.z, [0xc77dff, 0xffffff], 18, 6, 0.35, 0.45, 0, 0.5);
       for (let d = 14; d >= 2; d -= 1) {
-        const x = k.x + fx * d, z = k.z + fz * d; let ok = Math.hypot(x, z) < R - KR - 0.5;
-        for (const p of pillars) if (ok && k.y < p.h && Math.hypot(x - p.x, z - p.z) < p.r + KR) ok = false;
-        if (ok && k.y < 1.05) for (const s of lows) { const [cx, cz] = segClosest(x, z, s); if (Math.hypot(x - cx, z - cz) < KR + 0.5) ok = false; }
-        if (ok) { k.x = x; k.z = z; break; }
+        const x = k.x + fx * d, z = k.z + fz * d;
+        if (validSpot(x, z, k.y)) { k.x = x; k.z = z; break; }
       }
       emit(k.x, k.y + 0.8, k.z, [0xc77dff, 0xffffff], 18, 6, 0.35, 0.45, 0, 0.5); sfx.blink(k.x, k.z);
     } else if (w === 'lightning') {
@@ -1015,26 +1144,37 @@ function useWeapon(k, inp) {
         }
       }
     } else if (w === 'turbo') { k.turboT = 3; k.boostT = 0; sfx.boost(k.x, k.z); }
+    else if (w === 'push') {
+      const cx = k.x + fx * 6, cz = k.z + fz * 6;
+      ring(cx, cz, 8, 0x9be7ff, k.y); emit(k.x + fx * 3, k.y + 0.8, k.z + fz * 3, [0x9be7ff, 0xffffff], 24, 14, 0.35, 0.4, 0, 0.2);
+      sfx.shock(k.x, k.z); shake = Math.min(1.2, shake + 0.25 * vol(k.x, k.z)); pushEv(['fx', 'push', r1(cx), r1(cz)]);
+      for (const o of karts) { // kegle foran: skubbes væk fra dig og fremad
+        if (o === k || !o.alive) continue; const dx = o.x - k.x, dz = o.z - k.z, d = Math.hypot(dx, dz), n = d || 1;
+        if (d > 15 || Math.abs(o.y - k.y) > 3 || (dx * fx + dz * fz) / n < 0.5) continue;
+        let ux = dx / n + fx, uz = dz / n + fz; const un = Math.hypot(ux, uz) || 1, pw = 40 * (1 - d / 25);
+        damage(o, 8, k, 'Skubbebølge', ux / un * pw, uz / un * pw);
+      }
+    }
     else if (w === 'shock') {
-      ring(k.x, k.z, 11, 0x46d9ff); ring(k.x, k.z, 7, 0xffffff); emit(k.x, 0.5, k.z, [0x46d9ff, 0xffffff], 24, 16, 0.35, 0.5, -4, 0.1);
+      ring(k.x, k.z, 11, 0x46d9ff, k.y); ring(k.x, k.z, 7, 0xffffff, k.y); emit(k.x, k.y + 0.5, k.z, [0x46d9ff, 0xffffff], 24, 16, 0.35, 0.5, -4, 0.1);
       sfx.shock(k.x, k.z); shake = Math.min(1.2, shake + 0.4 * vol(k.x, k.z)); pushEv(['fx', 'shock', r1(k.x), r1(k.z)]);
       for (const o of karts) {
         if (o === k || !o.alive) continue; const dx = o.x - k.x, dz = o.z - k.z, d = Math.hypot(dx, dz);
-        if (d < 11 && Math.abs(o.y - k.y) < 3) { const n = d || 1; if (o.y < 0.1 && o.shieldT <= 0) o.vy = 7; damage(o, Math.round(18 + 22 * (1 - d / 11)), k, 'Chokbølge', dx / n * 24, dz / n * 24); }
+        if (d < 11 && Math.abs(o.y - k.y) < 3) { const n = d || 1; if (air(o) < 0.1 && o.shieldT <= 0) o.vy = 7; damage(o, Math.round(18 + 22 * (1 - d / 11)), k, 'Chokbølge', dx / n * 32, dz / n * 32); }
       }
     }
     k.ammo--;
   }
   if (k.ammo <= 0) k.weapon = null;
 }
-function removeProj(p) { const i = projs.indexOf(p); if (i < 0) return; scene.remove(p.m); projs.splice(i, 1); const o = p.owner; if (o.boomProj === p) { o.boomProj = null; if (o.weapon === 'boomerang' && o.wStage) { o.weapon = null; o.wStage = 0; } } }
+function removeProj(p) { const i = projs.indexOf(p); if (i < 0) return; scene.remove(p.m); if (p.rope) { scene.remove(p.rope); p.rope.geometry.dispose(); } projs.splice(i, 1); const o = p.owner; if (o.boomProj === p) { o.boomProj = null; if (o.weapon === 'boomerang' && o.wStage) { o.weapon = null; o.wStage = 0; } } }
 function removeMine(m) { scene.remove(m.g); mines.splice(mines.indexOf(m), 1); }
 function blast(p, direct) {
   explode(p.x, p.y, p.z, p.type === 'homing' ? 1.1 : 1);
   if (!p.ghost) for (const o of karts) {
     if (!o.alive || o === p.owner || o === direct) continue;
     const dx = o.x - p.x, dz = o.z - p.z, d = Math.hypot(dx, dz, (o.y + 0.7 - p.y) * 1.5);
-    if (d < 4.5) { const n = Math.hypot(dx, dz) || 1; damage(o, Math.round(26 * (1 - d / 4.5)) + 4, p.owner, p.type === 'homing' ? 'Målsøger' : 'Raket', dx / n * 10, dz / n * 10); }
+    if (d < 4.5) { const n = Math.hypot(dx, dz) || 1; damage(o, Math.round(26 * (1 - d / 4.5)) + 4, p.owner, p.type === 'homing' ? 'Målsøger' : 'Raket', dx / n * 20, dz / n * 20); }
   }
 }
 function updateProjs(dt) {
@@ -1045,16 +1185,18 @@ function updateProjs(dt) {
       if (!p.target.alive) p.target = nearestEnemy(p.owner, false);
       if (p.target) p.a += clamp(angDiff(p.a, Math.atan2(p.target.x - p.x, p.target.z - p.z)), -2.4 * dt, 2.4 * dt);
     }
+    { const g = groundAt(p.x, p.z, p.y); if (g > VOID) p.gy = g; }
     if (p.type === 'boomerang') {
-      p.age += dt; p.y += (0.9 - p.y) * Math.min(1, 3 * dt);
+      p.age += dt; p.y += (p.gy + 0.9 - p.y) * Math.min(1, 3 * dt); p.y = Math.max(p.y, p.gy + 0.6);
       if (p.age > 0.7) { const o = p.owner; if (!o.alive) p.life = 0; else {
         if (!p.back) { p.back = true; p.hitSet.clear(); }
         p.a += clamp(angDiff(p.a, Math.atan2(o.x - p.x, o.z - p.z)), -5 * dt, 5 * dt);
         if (Math.hypot(o.x - p.x, o.z - p.z) < 2) p.life = 0; } }
     }
-    if (p.type === 'ice') { p.y += (0.8 - p.y) * Math.min(1, 2.5 * dt); if (Math.random() < 0.6) emit(p.x, p.y, p.z, [0xbff3ff, 0xffffff], 1, 1, 0.25, 0.3, 0, 0.2); }
-    else if (p.type === 'bullet') { if (p.vy) { p.y += p.vy * dt; if (p.y < 0.8) { p.y = 0.8; p.vy = 0; } } }
-    else { p.y += (0.75 - p.y) * Math.min(1, p.yl * dt); if (Math.random() < 0.8) emit(p.x - Math.sin(p.a) * 0.6, p.y, p.z - Math.cos(p.a) * 0.6, [0xffd23f, 0xff8c1a, 0x8a90aa], 1, 1.5, 0.3, 0.35, 1, 0.2); }
+    if (p.type === 'ice') { p.y += (p.gy + 0.8 - p.y) * Math.min(1, 2.5 * dt); p.y = Math.max(p.y, p.gy + 0.5); if (Math.random() < 0.6) emit(p.x, p.y, p.z, [0xbff3ff, 0xffffff], 1, 1, 0.25, 0.3, 0, 0.2); }
+    else if (p.type === 'hook') p.y += (p.gy + 0.9 - p.y) * Math.min(1, 6 * dt);
+    else if (p.type === 'bullet') { if (p.vy) { p.y += p.vy * dt; if (p.y < p.gy + 0.8) { p.y = p.gy + 0.8; p.vy = 0; } } }
+    else { p.y += (p.gy + 0.75 - p.y) * Math.min(1, p.yl * dt); p.y = Math.max(p.y, p.gy + 0.45); if (Math.random() < 0.8) emit(p.x - Math.sin(p.a) * 0.6, p.y, p.z - Math.cos(p.a) * 0.6, [0xffd23f, 0xff8c1a, 0x8a90aa], 1, 1.5, 0.3, 0.35, 1, 0.2); }
     const steps = 2, sdt = dt / steps; let done = false;
     for (let s = 0; s < steps && !done; s++) {
       p.x += Math.sin(p.a) * p.sp * sdt; p.z += Math.cos(p.a) * p.sp * sdt;
@@ -1070,12 +1212,16 @@ function updateProjs(dt) {
           continue;
         }
         if (p.type === 'boomerang') {
-          if (!p.hitSet.has(o) && Math.hypot(o.x - p.x, o.z - p.z) < KR + 0.8 && Math.abs(o.y + 0.7 - p.y) < 1.3) { p.hitSet.add(o); damage(o, 22, p.owner, 'Bumerang', Math.sin(p.a) * 8, Math.cos(p.a) * 8); emit(p.x, p.y, p.z, [0xffd23f, 0xffffff], 10, 7, 0.25, 0.35); sfx.clink(p.x, p.z); }
+          if (!p.hitSet.has(o) && Math.hypot(o.x - p.x, o.z - p.z) < KR + 0.8 && Math.abs(o.y + 0.7 - p.y) < 1.3) { p.hitSet.add(o); damage(o, 22, p.owner, 'Bumerang', Math.sin(p.a) * 16, Math.cos(p.a) * 16); emit(p.x, p.y, p.z, [0xffd23f, 0xffffff], 10, 7, 0.25, 0.35); sfx.clink(p.x, p.z); }
           continue;
         }
         if (Math.hypot(o.x - p.x, o.z - p.z) < KR + 0.35 + p.hitR && Math.abs(o.y + 0.7 - p.y) < 1.1 + p.hitR) {
           const fx = Math.sin(p.a), fz = Math.cos(p.a);
-          if (p.type === 'bullet') { damage(o, 4, p.owner, 'Luftkanon', fx * 1.2, fz * 1.2); emit(p.x, p.y, p.z, 0xffe680, 3, 5, 0.18, 0.2); }
+          if (p.type === 'hook') {
+            const w = p.owner, dx = w.x - o.x, dz = w.z - o.z, n = Math.hypot(dx, dz) || 1, pull = Math.min(34, 10 + n * 1.1);
+            damage(o, 10, w, 'Krog', dx / n * pull, dz / n * pull); emit(p.x, p.y, p.z, [0xb8c0cc, 0xffffff], 10, 6, 0.25, 0.35); sfx.clink(p.x, p.z);
+          }
+          else if (p.type === 'bullet') { damage(o, 4, p.owner, 'Luftkanon', fx * 2, fz * 2); emit(p.x, p.y, p.z, 0xffe680, 3, 5, 0.18, 0.2); }
           else if (p.type === 'ice') {
             const pw = p.power;
             if (o.shieldT <= 0 && o.invulnT <= 0) { o.frozenT = 0.5; o.slowT = 1.5 + pw * 1.5; o.driftDir = 0; o.driftT = 0; }
@@ -1083,16 +1229,19 @@ function updateProjs(dt) {
             for (const q of karts) if (q !== o && q !== p.owner && q.alive && Math.hypot(q.x - p.x, q.z - p.z) < 2.5 + pw * 3.5) { if (q.shieldT <= 0) q.slowT = Math.max(q.slowT, 1.5); damage(q, 6, p.owner, 'Isbombe'); }
             emit(p.x, p.y, p.z, [0xbff3ff, 0xffffff, 0x46d9ff], 20 + pw * 20, 9 + pw * 5, 0.35 + pw * 0.3, 0.6); ring(p.x, p.z, 3 + pw * 4, 0xbff3ff); sfx.ice(p.x, p.z);
           }
-          else { damage(o, p.type === 'homing' ? 40 : 38, p.owner, p.type === 'homing' ? 'Målsøger' : 'Raket', fx * 12, fz * 12); if (o.alive && o.shieldT <= 0 && o.y < 0.1) o.vy = 6; blast(p, o); }
+          else { damage(o, p.type === 'homing' ? 40 : 38, p.owner, p.type === 'homing' ? 'Målsøger' : 'Raket', fx * 24, fz * 24); if (o.alive && o.shieldT <= 0 && air(o) < 0.1) o.vy = 6; blast(p, o); }
           done = true; break;
         }
       }
-      if (!done && p.type === 'boomerang') { const d = Math.hypot(p.x, p.z); if (d > R - 0.5) { p.x *= (R - 0.5) / d; p.z *= (R - 0.5) / d; if (!p.back) p.age = 0.7; } continue; }
-      if (!done && solid(p.x, p.y, p.z)) { if (p.type === 'bullet') emit(p.x, p.y, p.z, 0xffe680, 3, 4, 0.15, 0.2); else if (p.type === 'ice') emit(p.x, p.y, p.z, [0xbff3ff, 0xffffff], 12, 6, 0.3, 0.5); else blast(p, null); done = true; }
+      if (!done && p.type === 'boomerang') { if (!p.back && (Math.hypot(p.x, p.z) > R + 6 || solid(p.x, p.y, p.z))) p.age = 0.7; continue; }
+      if (!done && solid(p.x, p.y, p.z)) { if (p.type === 'hook') { const w = p.owner; emit(p.x, p.y, p.z, [0xb8c0cc, 0xffffff], 10, 5, 0.25, 0.35); sfx.clink(p.x, p.z);
+          if (!p.ghost && w.alive) { const dx = p.x - w.x, dz = p.z - w.z, n = Math.hypot(dx, dz) || 1, pull = Math.min(36, 12 + n * 1.2); w.vx = dx / n * pull; w.vz = dz / n * pull; w.vy = Math.max(w.vy, clamp(25 * n / pull, 8, 14)); w.knockT = 0.6; w.a = Math.atan2(dx, dz); } }
+        else if (p.type === 'bullet') emit(p.x, p.y, p.z, 0xffe680, 3, 4, 0.15, 0.2); else if (p.type === 'ice') emit(p.x, p.y, p.z, [0xbff3ff, 0xffffff], 12, 6, 0.3, 0.5); else blast(p, null); done = true; }
     }
     if (done || p.life <= 0) { if (!done && (p.type === 'rocket' || p.type === 'homing')) blast(p, null); removeProj(p); continue; }
     if (p.type === 'ice') p.m.rotation.z += dt * 8;
     if (p.type === 'boomerang') { p.m.position.set(p.x, p.y, p.z); p.m.rotation.y = time * 18; continue; }
+    if (p.rope) { const a = p.rope.geometry.attributes.position, o = p.owner; a.setXYZ(0, o.x, o.y + 0.9, o.z); a.setXYZ(1, p.x, p.y, p.z); a.needsUpdate = true; }
     p.m.position.set(p.x, p.y, p.z); p.m.rotation.y = p.a;
   }
   for (let i = mines.length - 1; i >= 0; i--) {
@@ -1100,20 +1249,20 @@ function updateProjs(dt) {
     m.light.material.color.setHex(m.arm > 0 ? 0x666666 : (Math.floor(time * 4) % 2 ? 0xff3d6e : 0x551020));
     let boom = m.life <= 0;
     if (m.arm <= 0) for (const o of karts) {
-      if (!o.alive || o.y > 0.6 || Math.hypot(o.x - m.x, o.z - m.z) > KR + 0.6) continue;
+      if (!o.alive || Math.abs(o.y - m.y) > 0.6 || Math.hypot(o.x - m.x, o.z - m.z) > KR + 0.6) continue;
       if (o.shieldT <= 0 && o.invulnT <= 0) o.vy = 8;
       damage(o, 45, m.owner, 'Mine', rand(-4, 4), rand(-4, 4)); boom = true; break;
     }
-    if (boom) { explode(m.x, 0.4, m.z, 0.9); removeMine(m); }
+    if (boom) { explode(m.x, m.y + 0.4, m.z, 0.9); removeMine(m); }
   }
   for (let i = slicks.length - 1; i >= 0; i--) {
     const s = slicks[i]; s.life -= dt;
     if (s.life <= 0) { removeSlick(s); continue; }
     if (s.life < 2) s.m.scale.setScalar(s.life / 2);
     for (const o of karts) {
-      if (!o.alive || o.remote || o === s.owner || o.y > 0.3 || o.spinImmune > 0 || Math.hypot(o.x - s.x, o.z - s.z) > 2.3 + KR * 0.6) continue;
+      if (!o.alive || o.remote || o === s.owner || Math.abs(o.y - s.y) > 0.3 || o.spinImmune > 0 || Math.hypot(o.x - s.x, o.z - s.z) > 2.3 + KR * 0.6) continue;
       o.spinImmune = 2;
-      if (o.shieldT <= 0 && o.invulnT <= 0) { o.spinT = 1.1; o.driftDir = 0; o.driftT = 0; sfx.oil(o.x, o.z); emit(o.x, 0.3, o.z, 0x2a1f45, 8, 4, 0.3, 0.5, -6, 0.3); }
+      if (o.shieldT <= 0 && o.invulnT <= 0) { o.spinT = 1.1; o.driftDir = 0; o.driftT = 0; sfx.oil(o.x, o.z); emit(o.x, o.y + 0.3, o.z, 0x2a1f45, 8, 4, 0.3, 0.5, -6, 0.3); }
       damage(o, 8, s.owner, 'Olieplet');
     }
   }
@@ -1124,6 +1273,11 @@ function stepKart(k, inp, dt) {
   for (const t of TIMERS) k[t] -= dt;
   if (k.superT > 0) k.superT -= dt;
   if (k.frozenT > 0) { k.vx = 0; k.vz = 0; inp = NOINPUT; }
+  if (!k.weapon && k.weapon2 && !k.wStage) {
+    k.weapon = k.weapon2; k.weapon2 = null; k.ammo = WEAPONS[k.weapon].ammo; k.fireCd = Math.max(k.fireCd, 0.35); k.charge = 0;
+    if (k.ai) k.ai.holdT = 0;
+    if (k.isPlayer) { const el = $('weapon'); el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash'); }
+  }
   if (k.wStage) {
     k.wT -= dt;
     k.gunCd = (k.gunCd || 0) - dt;
@@ -1131,11 +1285,11 @@ function stepKart(k, inp, dt) {
     if (k.wT <= 0) { k.wStage = 0; k.weapon = null; k.boomProj = null; }
   }
   const hovering = k.weapon === 'mg' && k.wStage === 1 && !k.slamming;
-  const grounded = k.y <= 0.001, spinning = k.spinT > 0;
+  const grounded = k.gh > VOID && k.y - k.gh <= 0.001, spinning = k.spinT > 0;
   // drift: hold Space mens du drejer, slip for et mini-boost
   if (inp.drift && grounded && k.speed > (k.driftDir ? 3 : 7) && !spinning && (k.driftDir || inp.steer)) { if (!k.driftDir) k.driftDir = Math.sign(inp.steer); k.driftT += dt; }
   else if (k.driftDir) {
-    if (k.driftT > 0.7) { const big = k.driftT > 1.6; k.dboostT = big ? 1.8 : 1.1; k.dboostKick = big ? 12 : 7; sfx.boost(k.x, k.z); emit(k.x, 0.5, k.z, big ? [0xff9f1a, 0xffd23f] : [0x46d9ff, 0xffffff], 16, 7, 0.3, 0.4, 0, 0.2); }
+    if (k.driftT > 0.7) { const big = k.driftT > 1.6; k.dboostT = big ? 1.8 : 1.1; k.dboostKick = big ? 12 : 7; sfx.boost(k.x, k.z); emit(k.x, k.y + 0.5, k.z, big ? [0xff9f1a, 0xffd23f] : [0x46d9ff, 0xffffff], 16, 7, 0.3, 0.4, 0, 0.2); }
     k.driftT = 0; k.driftDir = 0;
   }
   const drifting = k.driftDir !== 0;
@@ -1153,30 +1307,40 @@ function stepKart(k, inp, dt) {
   let cap = (k.ai ? 0.95 : 1) * (k.dashT > 0 ? 34 : k.dboostT > 0 ? 32 : (k.boostT > 0 || k.turboT > 0) ? 26 : 18);
   if (!grounded) cap += 7; // i luften kører man hurtigere
   if (k.slowT > 0) cap *= 0.55;
-  if (f > cap) f -= (f - cap) * Math.min(1, 2.5 * dt);
-  if (f < -8) f = -8;
+  if (f > cap) f -= (f - cap) * Math.min(1, (k.knockT > 0 ? 1 : 2.5) * dt);
+  if (f < -8) f = k.knockT > 0 ? f + (-8 - f) * Math.min(1, 1.5 * dt) : -8; // skubbet baglæns: bevar farten et øjeblik
   const l0 = Math.abs(l);
-  l *= Math.pow(!grounded ? 0.3 : spinning ? 0.2 : drifting ? 0.12 : MAP.grip, dt);
+  l *= Math.pow(!grounded || k.knockT > 0 ? 0.3 : spinning ? 0.2 : drifting ? 0.12 : MAP.grip, dt);
   if (drifting) f += (l0 - Math.abs(l)) * 0.7; // drift bevarer farten
   if (inp.dash && k.dashCd <= 0 && !spinning) { k.dashCd = DASH_CD; k.dashT = 0.32; f = Math.max(f, 0) + 18; sfx.dash(k.x, k.z); }
-  if (inp.jump && k.jumpCd <= 0 && grounded) { k.jumpCd = JUMP_CD; k.vy = 13; f += 2; sfx.jump(k.x, k.z); emit(k.x, 0.2, k.z, 0xb9b3ef, 8, 4, 0.35, 0.4, -2, 0.1); }
+  if (inp.jump && k.jumpCd <= 0 && grounded) { k.jumpCd = JUMP_CD; k.vy = 13; f += 2; sfx.jump(k.x, k.z); emit(k.x, k.y + 0.2, k.z, 0xb9b3ef, 8, 4, 0.35, 0.4, -2, 0.1); }
   k.vx = fx * f + fz * l; k.vz = fz * f - fx * l;
+  const ox = k.x, oz = k.z;
   k.x += k.vx * dt; k.z += k.vz * dt;
-  if (hovering) { k.vy += ((4 - k.y) * 14 - k.vy * 5) * dt; k.y = Math.max(0, k.y + k.vy * dt); }
-  else if (k.y > 0 || k.vy > 0) {
-    k.vy -= (k.slamming ? 60 : k.superT > 0 ? 14 : 28) * dt; k.y += k.vy * dt;
-    if (k.y <= 0) { if (k.slamming) slam(k); else if (k.vy < -7) emit(k.x, 0.2, k.z, 0xb9b3ef, 8, 4, 0.35, 0.4, -2, 0.1); k.y = 0; k.vy = 0; k.slamming = false; }
-  }
   collideWorld(k);
+  if (k.y < -STEP && onFloor(k.x, k.z)) { k.x = ox; k.z = oz; k.vx *= -0.2; k.vz *= -0.2; } // faldet ud over kanten: ikke ind under gulvet
+  const gh = groundAt(k.x, k.z, k.y);
+  if (hovering) { const base = gh > VOID ? gh : k.y - 4; k.vy += ((base + 4 - k.y) * 14 - k.vy * 5) * dt; k.y = Math.max(gh, k.y + k.vy * dt); k.slopeVy = 0; }
+  else if (grounded && k.vy <= 0 && gh > VOID && k.y - gh <= 0.45) {
+    // på jorden: følg terrænet op ad ramper og ned ad skråninger
+    k.slopeVy = (gh - k.y) / dt; k.y = gh; k.vy = 0;
+  } else {
+    if (grounded && k.vy <= 0) k.vy = Math.max(0, k.slopeVy || 0); // ud over toppen af en rampe: hop
+    k.slopeVy = 0;
+    k.vy -= (k.slamming ? 60 : k.superT > 0 ? 14 : 28) * dt; k.y += k.vy * dt;
+    if (gh > VOID && k.y <= gh) { if (k.slamming) slam(k); else if (k.vy < -7) emit(k.x, gh + 0.2, k.z, 0xb9b3ef, 8, 4, 0.35, 0.4, -2, 0.1); k.y = gh; k.vy = 0; k.slamming = false; }
+  }
+  k.gh = gh;
+  if (k.y < FALL_Y) { fallKill(k); return; }
   k.speed = f;
   if (k.weapon) useWeapon(k, inp);
-  if (!k.weapon) for (const b of boxes) {
-    if (b.active && k.y < 2.5 && Math.hypot(b.x - k.x, b.z - k.z) < 2.3) {
-      b.active = false; b.t = 6; b.m.visible = false; emit(b.x, 1.3, b.z, [0xff3d6e, 0xffb13d, 0xffffff], 14, 8, 0.35, 0.5); giveRandom(k); pushEv(['bx', boxes.indexOf(b)]); break;
+  if (!k.weapon || !k.weapon2) for (const b of boxes) {
+    if (b.active && Math.abs(k.y - b.y) < 2.5 && Math.hypot(b.x - k.x, b.z - k.z) < 2.3) {
+      b.active = false; b.t = 6; b.m.visible = false; emit(b.x, b.y + 1.3, b.z, [0xff3d6e, 0xffb13d, 0xffffff], 14, 8, 0.35, 0.5); giveRandom(k); pushEv(['bx', boxes.indexOf(b)]); break;
     }
   }
-  if (k.y < 0.1) for (const p of pads) {
-    if (Math.hypot(p.x - k.x, p.z - k.z) < 2.6) {
+  for (const p of pads) {
+    if (Math.abs(k.y - p.y) < 0.15 && Math.hypot(p.x - k.x, p.z - k.z) < 2.6) {
       if (k.boostT < 0.2) sfx.boost(k.x, k.z);
       k.boostT = 0.8; const ff = k.vx * fx + k.vz * fz; if (ff < 27) { k.vx += fx * (27 - ff); k.vz += fz * (27 - ff); }
     }
@@ -1192,8 +1356,8 @@ function kartCollisions() {
     if (rv > 0) { a.vx -= dx * rv * 0.9; a.vz -= dz * rv * 0.9; b.vx += dx * rv * 0.9; b.vz += dz * rv * 0.9; }
     for (const [s, t, sg] of [[a, b, 1], [b, a, -1]]) {
       if (!s.remote && (s.dashT > 0 || s.turboT > 0) && s.ramCd <= 0) {
-        s.ramCd = 0.7; damage(t, 18, s, 'Dash', dx * sg * 18, dz * sg * 18);
-        emit((a.x + b.x) / 2, 0.9, (a.z + b.z) / 2, [0xffffff, 0xffd23f], 10, 8, 0.3, 0.35);
+        s.ramCd = 0.7; damage(t, 18, s, 'Dash', dx * sg * 26, dz * sg * 26);
+        emit((a.x + b.x) / 2, (a.y + b.y) / 2 + 0.9, (a.z + b.z) / 2, [0xffffff, 0xffd23f], 10, 8, 0.3, 0.35);
       }
     }
   }
@@ -1203,9 +1367,14 @@ function kartCollisions() {
 function blocked(k, ang, len) {
   for (const s of [0.5, 1]) {
     const x = k.x + Math.sin(ang) * len * s, z = k.z + Math.cos(ang) * len * s;
-    if (Math.hypot(x, z) > R - 3) return 'wall';
-    for (const p of pillars) if (Math.hypot(x - p.x, z - p.z) < p.r + 1.6) return 'pillar';
-    if (k.y < 0.5) for (const sg of lows) { const [cx, cz] = segClosest(x, z, sg); if (Math.hypot(x - cx, z - cz) < 1.5) return 'low'; }
+    if (groundAt(x, z, k.y) === VOID) return 'wall'; // afgrund
+    for (const r of rails) if (within(k.y, r.y0, r.h)) { const [cx, cz] = segClosest(x, z, r); if (Math.hypot(x - cx, z - cz) < 1.6) return 'wall'; }
+    for (const p of pillars) if (within(k.y, p.y0, p.h) && Math.hypot(x - p.x, z - p.z) < p.r + 1.6) return 'pillar';
+    if (air(k) < 0.5) for (const sg of lows) if (within(k.y, sg.y0, 1.05)) { const [cx, cz] = segClosest(x, z, sg); if (Math.hypot(x - cx, z - cz) < 1.5) return 'low'; }
+    for (const so of solids) {
+      const [u, v] = sLocal(so, x, z); if (Math.abs(u) > so.hw + 1 || Math.abs(v) > so.hd + 1) continue;
+      const t = sTop(so, v); if (t > k.y + STEP && so.b < k.y + KH) return t - k.y < 2.6 ? 'low' : 'pillar'; // lav platform: hop op
+    }
   }
   return null;
 }
@@ -1215,7 +1384,7 @@ function aiThink(k, dt) {
   if (ai.retarget <= 0 || (ai.target && !ai.target.alive) || (ai.box && (!ai.box.active || k.weapon)) || (ai.crownGo && !crown.free)) {
     ai.retarget = rand(1, 2); ai.target = null; ai.box = null; ai.aimErr = rand(-0.09, 0.09) * (1.3 - ai.skill); ai.crownGo = false;
     if (!k.weapon) {
-      let bd = 1e9; for (const b of boxes) if (b.active) { const d = Math.hypot(b.x - k.x, b.z - k.z); if (d < bd) { bd = d; ai.box = b; } }
+      let bd = 1e9; for (const b of boxes) if (b.active) { const d = Math.hypot(b.x - k.x, b.z - k.z) + Math.abs(b.y - k.y) * 8; if (d < bd) { bd = d; ai.box = b; } }
       const e = nearestEnemy(k, false); if (e && (!ai.box || Math.hypot(e.x - k.x, e.z - k.z) < 9)) { ai.target = e; ai.box = null; }
     } else ai.target = nearestEnemy(k, Math.random() < 0.5);
     if (gameMode === 'crown') {
@@ -1231,7 +1400,7 @@ function aiThink(k, dt) {
   } else if (ai.crownGo && crown.free) { tx = crown.x; tz = crown.z; }
   else if (ai.box) { tx = ai.box.x; tz = ai.box.z; }
   else {
-    if (Math.hypot(ai.wander.x - k.x, ai.wander.z - k.z) < 6) { const a = rand(0, TAU), r = rand(10, 45); ai.wander = { x: Math.sin(a) * r, z: Math.cos(a) * r }; }
+    if (Math.hypot(ai.wander.x - k.x, ai.wander.z - k.z) < 6) { const pts = spawns.concat(boxes), q = pts[Math.floor(Math.random() * pts.length)]; ai.wander = { x: q.x, z: q.z }; }
     tx = ai.wander.x; tz = ai.wander.z;
   }
   const dist = Math.hypot(tx - k.x, tz - k.z), diff = angDiff(k.a, Math.atan2(tx - k.x, tz - k.z) + (ai.target ? ai.aimErr : 0));
@@ -1247,7 +1416,7 @@ function aiThink(k, dt) {
   // fastkørt
   if (Math.abs(k.speed) < 2.5 && ai.reverseT <= 0 && state !== 'countdown') ai.stuckT += dt; else ai.stuckT = 0;
   if (ai.stuckT > 0.9) { ai.reverseT = 0.9; ai.stuckT = 0; ai.revSteer = Math.random() < 0.5 ? 1 : -1; }
-  if (ai.reverseT > 0) { ai.reverseT -= dt; inp.throttle = -1; inp.steer = ai.revSteer; }
+  if (ai.reverseT > 0) { ai.reverseT -= dt; inp.throttle = blocked(k, k.a + Math.PI, 4) === 'wall' ? 0.6 : -1; inp.steer = ai.revSteer; }
   // kamp
   let threatened = false;
   for (const p of projs) {
@@ -1264,18 +1433,20 @@ function aiThink(k, dt) {
     const t = ai.target; let want = false;
     const td = t ? Math.hypot(t.x - k.x, t.z - k.z) : 1e9, ta = t ? Math.abs(angDiff(k.a, Math.atan2(t.x - k.x, t.z - k.z))) : 9;
     switch (k.weapon) {
-      case 'rocket': want = k.wStage ? (k.y > 1.5 && td < 50) : (td < 30 && ta < 0.5); break;
+      case 'rocket': want = k.wStage ? (air(k) > 1.5 && td < 50) : (td < 30 && ta < 0.5); break;
       case 'homing': want = td < 45 && ta < 0.7; break;
       case 'mg': want = k.wStage ? (td < 5 && k.wT < 2.2) : (td < 24 && ta < 0.4); break;
       case 'shock': want = td < 8.5; break;
       case 'boomerang': want = k.wStage ? (!!k.boomProj && !!t && Math.hypot(k.boomProj.x - t.x, k.boomProj.z - t.z) < 5) : (td < 26 && ta < 0.25); break;
       case 'shield': want = threatened || k.hp < 60 || ai.holdT > 8; break;
-      case 'superhop': want = !k.wStage ? td < 14 : (k.y > 2 && (td < 6 || k.vy < -3)); break;
+      case 'superhop': want = !k.wStage ? td < 14 : (air(k) > 2 && (td < 6 || k.vy < -3)); break;
       case 'oil': want = (ta > 2.4 && td < 18) || ai.holdT > 6; break;
       case 'ice': want = td < 36 && ta < 0.18; break;
       case 'blink': want = threatened || (td > 28 && ta < 0.3) || ai.holdT > 7; break;
       case 'lightning': want = ai.holdT > 1; break;
       case 'turbo': want = (td < 30 && ta < 0.3) || ai.holdT > 6; break;
+      case 'push': want = td < 13 && ta < 0.45; break;
+      case 'hook': want = td > 7 && td < 30 && ta < 0.12; break;
     }
     if (k.weapon === 'ice' && k.charge > 0) inp.fire = k.charge < ai.chargeGoal;
     else if (want) { ai.fireDelay -= dt; if (ai.fireDelay <= 0) { inp.fire = true; inp.fireP = true; ai.fireDelay = STAGED[k.weapon] && !k.wStage ? 0.15 : rand(0.28, 0.65) / ai.skill; ai.holdT = 0; ai.chargeGoal = rand(0.25, 1.1); } }
@@ -1283,18 +1454,48 @@ function aiThink(k, dt) {
   }
   if (k.dashCd <= 0 && !inp.jump) {
     if (ai.target && !k.weapon && dist < 10 && Math.abs(diff) < 0.2) inp.dash = true;
-    else if (Math.abs(diff) < 0.15 && dist > 25 && !bc && Math.random() < dt * 0.5) inp.dash = true;
+    else if (Math.abs(diff) < 0.15 && dist > 25 && !bc && !blocked(k, k.a, 22) && Math.random() < dt * 0.5) inp.dash = true;
+  }
+  // afgrund forude i den retning kartet glider: brems og drej mod fast grund
+  const sp = Math.hypot(k.vx, k.vz);
+  if (sp > 3 && air(k) < 0.5) {
+    const va = Math.atan2(k.vx, k.vz), stop = 3 + sp * sp / (MAP.grip > 0.01 ? 18 : 50); // på is glider man længere
+    const hole = (ang, d) => groundAt(k.x + Math.sin(ang) * d, k.z + Math.cos(ang) * d, k.y) === VOID;
+    const near = hole(va, stop * 0.5), far = hole(va, stop);
+    if (near || far) {
+      const l = hole(va + 0.9, stop * 0.7), r = hole(va - 0.9, stop * 0.7);
+      inp.steer = l && !r ? -1 : r && !l ? 1 : (inp.steer >= 0 ? 1 : -1);
+      inp.throttle = near ? -1 : Math.min(inp.throttle, 0.2); inp.dash = false; inp.drift = false;
+    }
   }
   return inp;
 }
 
 // ---------- HUD ----------
+// minikortets faste del tegnes én gang pr. bane: gulv, huller, platforme (lysere = højere), rækværk og forhindringer
+function drawMiniBg(S, X, Z, sc) {
+  const cv = document.createElement('canvas'); cv.width = cv.height = S; const g = cv.getContext('2d'), c = S / 2;
+  g.fillStyle = 'rgba(16,12,48,.72)'; g.beginPath(); g.arc(c, c, S / 2 - 2, 0, TAU); g.fill();
+  const poly = (P) => { g.beginPath(); P.forEach(([x, z], i) => i ? g.lineTo(X(x), Z(z)) : g.moveTo(X(x), Z(z))); g.closePath(); };
+  g.fillStyle = 'rgba(112,100,224,.95)'; for (const P of floors) { poly(P); g.fill(); }
+  g.fillStyle = 'rgba(16,12,48,1)'; for (const h of holes) { if (h.r) { g.beginPath(); g.arc(X(h.x), Z(h.z), h.r * sc, 0, TAU); } else poly(h.p); g.fill(); }
+  for (const s of [...solids].sort((a, b) => Math.max(a.h0, a.h1) - Math.max(b.h0, b.h1))) {
+    const corner = (u, v) => [s.x + u * s.ca + v * s.sa, s.z - u * s.sa + v * s.ca];
+    poly([corner(-s.hw, -s.hd), corner(s.hw, -s.hd), corner(s.hw, s.hd), corner(-s.hw, s.hd)]);
+    g.fillStyle = `hsl(250,70%,${Math.min(92, 70 + Math.max(s.h0, s.h1) * 3)}%)`; g.fill();
+    g.strokeStyle = s.kind === 'ramp' ? '#ffd23f' : 'rgba(30,20,80,.6)'; g.lineWidth = 2; g.stroke();
+  }
+  g.strokeStyle = 'rgba(255,61,110,.9)'; g.lineWidth = 4; for (const r of rails) { g.beginPath(); g.moveTo(X(r.x1), Z(r.z1)); g.lineTo(X(r.x2), Z(r.z2)); g.stroke(); }
+  g.fillStyle = '#3a2f8f'; for (const p of pillars) { g.beginPath(); g.arc(X(p.x), Z(p.z), p.r * sc, 0, TAU); g.fill(); }
+  g.strokeStyle = '#ffd23f'; g.lineWidth = 4; for (const s of lows) { g.beginPath(); g.moveTo(X(s.x1), Z(s.z1)); g.lineTo(X(s.x2), Z(s.z2)); g.stroke(); }
+  return cv;
+}
 const feedEl = $('feed');
 function feed(src, t, wname) {
   const el = document.createElement('div'); el.className = 'kf box' + (t.isPlayer || (src && src.isPlayer) ? ' mine' : '');
   const n = (k) => { const s = document.createElement('b'); s.textContent = k.isPlayer ? k.name + ' (dig)' : k.name; s.style.color = hex(k.color); return s; };
-  if (src) { el.append(n(src)); const w = document.createElement('span'); w.className = 'w'; w.textContent = wname; el.append(w, n(t)); }
-  else { el.append(n(t)); const w = document.createElement('span'); w.className = 'w'; w.textContent = 'ramte sin egen ' + wname.toLowerCase(); el.append(w); }
+  if (src) { el.append(n(src)); const w = document.createElement('span'); w.className = 'w'; w.textContent = wname === 'Afgrund' ? 'skubbede ned' : wname; el.append(w, n(t)); }
+  else { el.append(n(t)); const w = document.createElement('span'); w.className = 'w'; w.textContent = wname === 'Afgrund' ? 'faldt ned' : 'ramte sin egen ' + wname.toLowerCase(); el.append(w); }
   feedEl.appendChild(el); while (feedEl.children.length > 5) feedEl.firstChild.remove();
   setTimeout(() => el.remove(), 5000);
 }
@@ -1320,6 +1521,8 @@ function updateHud(dt) {
   else if (player.weapon === 'ice' && player.charge > 0) { w.classList.remove('empty'); $('wname').textContent = 'Lader op'; $('wsub').textContent = `${Math.round(player.charge / 1.2 * 100)}% · slip Shift for at kaste`; }
   else if (player.weapon) { const W = WEAPONS[player.weapon]; w.classList.remove('empty'); $('wname').textContent = W.name; $('wsub').textContent = W.ammo > 1 ? `${player.ammo} tilbage · ${W.sub}` : W.sub; }
   else { w.classList.add('empty'); $('wname').textContent = 'Intet våben'; $('wsub').textContent = 'Kør gennem en ?-kasse'; }
+  const wn = $('wnext'), nx = player.weapon2 ? WEAPONS[player.weapon2].name : '';
+  wn.hidden = !nx; if (wn.dataset.w !== nx) { wn.dataset.w = nx; wn.innerHTML = nx ? 'Næste: <b></b>' : ''; if (nx) wn.querySelector('b').textContent = nx; }
   const dp = clamp(1 - player.dashCd / DASH_CD, 0, 1), jp = clamp(1 - player.jumpCd / JUMP_CD, 0, 1);
   $('abDash').style.setProperty('--p', dp); $('abDash').classList.toggle('ready', dp >= 1);
   $('abJump').style.setProperty('--p', jp); $('abJump').classList.toggle('ready', jp >= 1);
@@ -1349,12 +1552,9 @@ function updateHud(dt) {
   if (msgTimer > 0) { msgTimer -= dt; if (!player.alive && state === 'play') { const s = $('msg').querySelector('.sub'); if (s && !s.dataset.base) s.dataset.base = s.textContent; if (s) s.textContent = `${s.dataset.base} · tilbage om ${Math.max(1, Math.ceil(player.respawnT))}`; } if (msgTimer <= 0) $('msg').innerHTML = ''; }
   // minimap
   const S = mini.width, c = S / 2, sc = (S / 2 - 6) / R;
-  mg.clearRect(0, 0, S, S);
-  mg.fillStyle = 'rgba(58,48,150,.8)'; mg.beginPath(); mg.arc(c, c, S / 2 - 2, 0, TAU); mg.fill();
-  mg.strokeStyle = 'rgba(255,61,110,.8)'; mg.lineWidth = 4; mg.stroke();
   const X = x => c - x * sc, Z = z => c - z * sc; // set fra oven, så +x er til venstre som i 3D
-  mg.fillStyle = '#c9c0ff'; for (const p of pillars) { mg.beginPath(); mg.arc(X(p.x), Z(p.z), p.r * sc, 0, TAU); mg.fill(); }
-  mg.strokeStyle = '#ffd23f'; mg.lineWidth = 4; for (const s of lows) { mg.beginPath(); mg.moveTo(X(s.x1), Z(s.z1)); mg.lineTo(X(s.x2), Z(s.z2)); mg.stroke(); }
+  if (!miniBg) miniBg = drawMiniBg(S, X, Z, sc);
+  mg.clearRect(0, 0, S, S); mg.drawImage(miniBg, 0, 0);
   mg.fillStyle = '#ff8c5a'; for (const b of boxes) if (b.active) mg.fillRect(X(b.x) - 4, Z(b.z) - 4, 8, 8);
   if (gameMode === 'crown') {
     const cx = crown.holder ? X(crown.holder.x) : X(crown.x), cz = crown.holder ? Z(crown.holder.z) : Z(crown.z);
@@ -1385,6 +1585,7 @@ for (const [key, m] of Object.entries(MAPS)) {
   b.querySelector('b').textContent = m.name; b.querySelector('small').textContent = m.desc;
   b.onclick = () => { if (mapKey === key) return; mapKey = key; mapWrap.querySelectorAll('.mapbtn').forEach(x => x.setAttribute('aria-pressed', x === b ? 'true' : 'false')); buildMap(key); startAttract(); };
   mapWrap.appendChild(b);
+  const o = document.createElement('option'); o.value = key; o.textContent = m.name; $('selMap').appendChild(o);
 }
 const MODES = { kills: ['Flest kills', 'Flest kills når tiden er gået vinder', '#ff3d6e'], crown: ['Keep the Crown', 'Hold kronen længst. Dræb holderen for at tage den', '#ffc83d'] };
 const timeWrap = $('times');
@@ -1607,7 +1808,7 @@ function ingest(peer) {
     const k = proxyFor(pid, e); seen.add(k.id); rec.kids.add(k.id);
     k.tx = +e[3] || 0; k.tz = +e[4] || 0; k.ty = +e[5] || 0; k.ta = +e[6] || 0; k.vx = +e[7] || 0; k.vz = +e[8] || 0; k.rt = time;
     const alive = !!e[10];
-    if (k.alive && !alive) { explode(k.x, k.y + 0.8, k.z, 1.4); emit(k.x, k.y + 0.8, k.z, [k.color, 0x22263a], 16, 11, 0.55, 1.4, -20, 0.8); k.m.g.visible = false; }
+    if (k.alive && !alive) { if (k.y > -2) { explode(k.x, k.y + 0.8, k.z, 1.4); emit(k.x, k.y + 0.8, k.z, [k.color, 0x22263a], 16, 11, 0.55, 1.4, -20, 0.8); } k.m.g.visible = false; }
     if (!k.alive && alive) { k.x = k.tx; k.z = k.tz; k.a = k.ta; k.m.g.visible = true; }
     k.alive = alive; k.hp = +e[9] || 0; k.rf = e[11] | 0; k.kills = e[12] | 0; k.deaths = e[13] | 0; k.dmg = +e[14] || 0; k.crownPts = (+e[15] || 0) / 10;
     k.shieldT = k.rf & F.SHIELD ? 1 : 0; k.invulnT = k.rf & F.INV ? 1 : 0; k.dashT = k.rf & F.DASH ? 1 : 0;
@@ -1635,7 +1836,7 @@ function handleEv(e) {
       if (+e[7] > 0) { k.frozenT = Math.min(1, +e[7]); k.driftDir = 0; k.driftT = 0; }
       if (+e[8] > 0) k.slowT = Math.min(4, +e[8]);
       if (+e[9] > 0) { k.spinT = Math.min(1.5, +e[9]); k.driftDir = 0; k.driftT = 0; }
-      if (+e[10] > 0 && k.y < 0.1) k.vy = Math.min(9, +e[10]);
+      if (+e[10] > 0 && air(k) < 0.1) k.vy = Math.min(9, +e[10]);
     }
   } else if (t === 'd') {
     const v = kartById.get(e[2]), by = kartById.get(e[3]) || null, w = String(e[4] || '');
@@ -1651,15 +1852,17 @@ function handleEv(e) {
     p.ghost = true; p.x = +e[4]; p.y = +e[5]; p.z = +e[6];
   } else if (t === 'o') {
     const o = kartById.get(e[2]); if (!o) return;
-    const m = new THREE.Mesh(oilGeo, oilMat); m.rotation.x = -Math.PI / 2; m.position.set(+e[3], 0.04, +e[4]); scene.add(m);
-    slicks.push({ x: +e[3], z: +e[4], owner: o, life: 20, m }); if (slicks.length > 10) removeSlick(slicks[0]);
+    const g = groundAt(+e[3], +e[4], o.y), y = g > VOID ? g : o.y;
+    const m = new THREE.Mesh(oilGeo, oilMat); m.rotation.x = -Math.PI / 2; m.position.set(+e[3], y + 0.04, +e[4]); scene.add(m);
+    slicks.push({ x: +e[3], z: +e[4], y, owner: o, life: 20, m }); if (slicks.length > 10) removeSlick(slicks[0]);
   } else if (t === 'fx') {
     const x = +e[3] || 0, z = +e[4] || 0;
-    if (e[2] === 'shock') { ring(x, z, 11, 0x46d9ff); ring(x, z, 7, 0xffffff); emit(x, 0.5, z, [0x46d9ff, 0xffffff], 24, 16, 0.35, 0.5, -4, 0.1); sfx.shock(x, z); }
-    else if (e[2] === 'slam') { ring(x, z, 9, 0xffd23f); ring(x, z, 6, 0xffffff); explode(x, 0.5, z, 1.3); }
+    if (e[2] === 'shock') { ring(x, z, 11, 0x46d9ff); ring(x, z, 7, 0xffffff); emit(x, topAt(x, z) + 0.5, z, [0x46d9ff, 0xffffff], 24, 16, 0.35, 0.5, -4, 0.1); sfx.shock(x, z); }
+    else if (e[2] === 'slam') { ring(x, z, 9, 0xffd23f); ring(x, z, 6, 0xffffff); explode(x, topAt(x, z) + 0.5, z, 1.3); }
     else if (e[2] === 'bolt') { bolt(x, z); sfx.thunder(x, z); }
+    else if (e[2] === 'push') { ring(x, z, 8, 0x9be7ff); emit(x, topAt(x, z) + 0.8, z, [0x9be7ff, 0xffffff], 24, 14, 0.35, 0.4, 0, 0.2); sfx.shock(x, z); }
   } else if (t === 'bx') {
-    const b = boxes[e[2] | 0]; if (b && b.active) { b.active = false; b.t = 6; b.m.visible = false; emit(b.x, 1.3, b.z, [0xff3d6e, 0xffb13d, 0xffffff], 14, 8, 0.35, 0.5); }
+    const b = boxes[e[2] | 0]; if (b && b.active) { b.active = false; b.t = 6; b.m.visible = false; emit(b.x, b.y + 1.3, b.z, [0xff3d6e, 0xffb13d, 0xffffff], 14, 8, 0.35, 0.5); }
   }
 }
 function hostRec() {
@@ -1750,7 +1953,7 @@ function updateOnline(dt) {
       const ahead = Math.min(0.25, time - (k.rt || time));
       const px = k.tx + k.vx * ahead, pz = k.tz + k.vz * ahead, f = Math.min(1, 14 * dt);
       if (Math.hypot(px - k.x, pz - k.z) > 10) { k.x = px; k.z = pz; } else { k.x += (px - k.x) * f; k.z += (pz - k.z) * f; }
-      k.y += ((k.ty || 0) - k.y) * f; k.a += angDiff(k.a, k.ta || 0) * f;
+      k.y += ((k.ty || 0) - k.y) * f; k.a += angDiff(k.a, k.ta || 0) * f; k.gh = groundAt(k.x, k.z, k.y);
       k.speed = Math.hypot(k.vx, k.vz) * (Math.cos(Math.atan2(k.vx, k.vz) - k.a) >= 0 ? 1 : -1);
       k.gunCd -= dt; if ((k.rf & F.GUN) && k.gunCd <= 0) { k.gunCd = 0.1; for (const s of [0.55, -0.55]) { const p = spawnProj('bullet', k, s); if (p) p.ghost = true; } }
     }
@@ -2041,12 +2244,13 @@ function update(dt) {
   for (const b of boxes) {
     if (!b.active) { b.t -= dt; if (b.t <= 0) { b.active = true; b.m.visible = true; b.m.scale.setScalar(0.1); } continue; }
     b.m.scale.setScalar(Math.min(1, b.m.scale.x + dt * 3));
-    b.m.rotation.y += dt * 1.4; b.m.rotation.x = 0.35; b.m.position.y = 1.3 + Math.sin(time * 2.5 + b.x) * 0.2;
+    b.m.rotation.y += dt * 1.4; b.m.rotation.x = 0.35; b.m.position.y = b.y + 1.3 + Math.sin(time * 2.5 + b.x) * 0.2;
   }
   for (const k of karts) {
     if (!k.alive) continue; const g = k.m.g;
     g.position.set(k.x, k.y, k.z); g.rotation.y = k.a + k.driftDir * 0.32;
-    g.rotation.z = -k.steerVis * 0.07 * clamp(k.speed / 20, -1, 1); g.rotation.x = k.y > 0 ? -clamp(k.vy * 0.03, -0.25, 0.25) : 0;
+    g.rotation.z = -k.steerVis * 0.07 * clamp(k.speed / 20, -1, 1); const pitch = air(k) > 0.05 ? -clamp(k.vy * 0.03, -0.25, 0.25) : -clamp(Math.atan2(k.slopeVy || 0, Math.max(4, Math.abs(k.speed))), -0.45, 0.45);
+    g.rotation.x += (pitch - g.rotation.x) * Math.min(1, 12 * dt);
     for (const w of k.m.wheels) w.rotation.x += k.speed * dt / 0.32;
     for (const w of k.m.front) w.rotation.y = k.steerVis * 0.4;
     const rSlow = k.remote && (k.rf & F.SLOW), rFroz = k.remote && (k.rf & F.FROZEN);
@@ -2054,7 +2258,7 @@ function update(dt) {
     g.visible = k.invulnT > 0 ? Math.floor(time * 12) % 2 === 0 : true;
     k.m.ice.visible = k.frozenT > 0 || !!rFroz;
     k.m.shield.visible = k.shieldT > 0; if (k.shieldT > 0) { k.m.shield.scale.setScalar(1 + Math.sin(time * 8) * 0.04); k.m.shield.material.opacity = k.shieldT < 1.5 && Math.floor(time * 8) % 2 ? 0.08 : 0.22; }
-    if (k.driftDir && Math.random() < 0.8) { const c = k.driftT > 1.6 ? 0xff9f1a : k.driftT > 0.7 ? 0x46d9ff : 0xffffff; for (const s of [-1, 1]) emit(k.x - Math.sin(k.a) * 1 + Math.cos(k.a) * s * 0.8, 0.2, k.z - Math.cos(k.a) * 1 - Math.sin(k.a) * s * 0.8, c, 1, 3, 0.18, 0.25, -6, 0.6); }
+    if (k.driftDir && Math.random() < 0.8) { const c = k.driftT > 1.6 ? 0xff9f1a : k.driftT > 0.7 ? 0x46d9ff : 0xffffff; for (const s of [-1, 1]) emit(k.x - Math.sin(k.a) * 1 + Math.cos(k.a) * s * 0.8, k.y + 0.2, k.z - Math.cos(k.a) * 1 - Math.sin(k.a) * s * 0.8, c, 1, 3, 0.18, 0.25, -6, 0.6); }
     if (k.dboostT > 0) emit(k.x - Math.sin(k.a) * 1.6, k.y + 0.5, k.z - Math.cos(k.a) * 1.6, [0xff9f1a, 0x46d9ff, 0xffffff], 2, 3, 0.35, 0.3, 0, 0);
     if (k.turboT > 0) emit(k.x - Math.sin(k.a) * 1.6, k.y + 0.5, k.z - Math.cos(k.a) * 1.6, [0xff9f1a, 0xffd23f], 2, 2, 0.35, 0.3, 0, 0);
     if ((k.slowT > 0 || rSlow) && Math.random() < 0.3) emit(k.x, k.y + 1, k.z, 0xbff3ff, 1, 1.5, 0.2, 0.5, -2, 0.5);
@@ -2069,15 +2273,14 @@ function updateCamera(dt) {
     const p = player;
     camYaw += angDiff(camYaw, p.a) * Math.min(1, (p.alive ? 4.5 : 1) * dt);
     const sx = Math.sin(camYaw), sz = Math.cos(camYaw);
-    tmpV.set(p.x - sx * 9.5, 4.8 + p.y * 0.95, p.z - sz * 9.5);
-    const cr = Math.hypot(tmpV.x, tmpV.z);
-    if (cr > R - 1) { const s = (R - 1) / cr; tmpV.x *= s; tmpV.z *= s; tmpV.y += (cr - R + 1) * 0.8; }
+    const py = Math.max(p.y, -3); // følg ikke med helt ned, når man falder
+    tmpV.set(p.x - sx * 9.5, 4.8 + py * 0.95, p.z - sz * 9.5);
     camera.position.lerp(tmpV, Math.min(1, 9 * dt));
-    camera.lookAt(p.x + sx * 5, 1.3 + p.y * 0.95, p.z + sz * 5);
+    camera.lookAt(p.x + sx * 5, 1.3 + py * 0.95, p.z + sz * 5);
     const fov = 62 + clamp(p.speed, 0, 34) * 0.4;
     if (Math.abs(camera.fov - fov) > 0.05) { camera.fov += (fov - camera.fov) * Math.min(1, 6 * dt); camera.updateProjectionMatrix(); }
   } else {
-    const a = time * 0.07; camera.position.set(Math.sin(a) * 74, 40, Math.cos(a) * 74); camera.lookAt(0, 0, 0);
+    const a = time * 0.07; camera.position.set(Math.sin(a) * (R + 16), 40, Math.cos(a) * (R + 16)); camera.lookAt(0, 0, 0);
     if (camera.fov !== 55) { camera.fov = 55; camera.updateProjectionMatrix(); }
   }
   if (shake > 0) { camera.position.x += rand(-1, 1) * shake * 0.6; camera.position.y += rand(-1, 1) * shake * 0.4; }
